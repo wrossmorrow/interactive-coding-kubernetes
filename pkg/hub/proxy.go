@@ -32,20 +32,23 @@ func (s *Server) handleSessionProxy(w http.ResponseWriter, r *http.Request) {
 	// through the browser proxy (/s/{id}/api/cmd).
 	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/api/cmd") && r.Body != nil {
 		const maxCmdBytes = 32 << 20
-		if body, err := io.ReadAll(io.LimitReader(r.Body, maxCmdBytes+1)); err == nil {
-			if len(body) > maxCmdBytes {
-				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"success": false, "error": "request body too large"})
-				return
-			}
-			r.Body = io.NopCloser(bytes.NewReader(body))
-			var peek struct {
-				Type string `json:"type"`
-			}
-			if json.Unmarshal(body, &peek) == nil {
-				switch peek.Type {
-				case "prompt", "steer", "follow_up":
-					go s.resetHumanTurn(id)
-				}
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxCmdBytes+1))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "read request body: " + err.Error()})
+			return
+		}
+		if len(body) > maxCmdBytes {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"success": false, "error": "request body too large"})
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		var peek struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(body, &peek) == nil {
+			switch peek.Type {
+			case "prompt", "steer", "follow_up":
+				go s.resetHumanTurn(id)
 			}
 		}
 	}

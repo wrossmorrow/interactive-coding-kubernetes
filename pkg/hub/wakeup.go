@@ -339,6 +339,14 @@ func (s *Server) TriggerWakeup(ctx context.Context, meta *sessions.Metadata, rev
 	if latestMeta, lerr := s.loadMetadata(ctx, meta.SessionID); lerr == nil && latestMeta != nil {
 		meta = latestMeta
 	}
+	if meta.Status == sessions.StatusClosed || meta.SessionKind.IsAutomated() || effectiveWakePolicy(meta) == sessions.WakePolicyOff {
+		s.metaMu.Unlock()
+		return fmt.Errorf("session %s no longer eligible for wake-up (status=%s policy=%s)", meta.SessionID, meta.Status, effectiveWakePolicy(meta))
+	}
+	if meta.WakeupsSinceHumanTurn >= effectiveMaxWakeups(meta) {
+		s.metaMu.Unlock()
+		return fmt.Errorf("wakeup cap reached (%d/%d) for session %s", meta.WakeupsSinceHumanTurn, effectiveMaxWakeups(meta), meta.SessionID)
+	}
 	prevWakeups := meta.WakeupsSinceHumanTurn
 	prevReviewID := meta.LastProcessedReviewID
 	prevStatus := meta.Status

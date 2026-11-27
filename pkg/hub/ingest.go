@@ -110,7 +110,9 @@ func mergeHubMetadata(incoming, existing *sessions.Metadata) {
 	if incoming.Status == "" {
 		incoming.Status = existing.Status
 	}
-	if existing.Status == sessions.StatusNeedsAttention && incoming.Status == sessions.StatusActive {
+	// Preserve needs-attention across both active flushes and idle-pause to $0;
+	// only an explicit close overwrites needs-attention.
+	if existing.Status == sessions.StatusNeedsAttention && incoming.Status != sessions.StatusClosed {
 		incoming.Status = sessions.StatusNeedsAttention
 	}
 }
