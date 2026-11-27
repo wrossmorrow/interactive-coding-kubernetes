@@ -2,12 +2,17 @@ package hub_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/wrossmorrow/k8s-agents/pkg/hub"
 	"github.com/wrossmorrow/k8s-agents/pkg/sessions"
@@ -193,4 +198,48 @@ func TestWakeWatcherETagRejoinAndAntiPingPongCap(t *testing.T) {
 		t.Fatalf("anti-ping-pong cap failed: injected %d prompts, want 1", len(injected))
 	}
 	injMu.Unlock()
+}
+
+func TestGitHubAppTokenProviderMintsAndCachesToken(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(priv),
+	})
+
+	var calls int
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path != "/app/installations/999/access_tokens" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+			t.Fatalf("missing JWT bearer header")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token":      "ghs_minted_123",
+			"expires_at": time.Now().Add(1 * time.Hour).UTC().Format(time.RFC3339),
+		})
+	}))
+	defer gh.Close()
+
+	tp, err := hub.NewGitHubAppTokenProvider("12345", "999", pemBytes, gh.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok1, err := tp.Token(context.Background())
+	if err != nil || tok1 != "ghs_minted_123" {
+		t.Fatalf("tok1 = (%q, %v)", tok1, err)
+	}
+	tok2, err := tp.Token(context.Background())
+	if err != nil || tok2 != "ghs_minted_123" {
+		t.Fatalf("tok2 = (%q, %v)", tok2, err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected cached token (1 HTTP call), got %d calls", calls)
+	}
 }

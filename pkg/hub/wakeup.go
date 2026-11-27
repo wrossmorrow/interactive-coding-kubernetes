@@ -41,9 +41,10 @@ type ReviewFetcher interface {
 
 // GitHubReviewFetcher polls GitHub's REST API using conditional ETags.
 type GitHubReviewFetcher struct {
-	BaseURL    string
-	Token      string
-	HTTPClient *http.Client
+	BaseURL       string
+	Token         string
+	TokenProvider TokenProvider
+	HTTPClient    *http.Client
 }
 
 func (g *GitHubReviewFetcher) ListReviews(ctx context.Context, repo string, pr int, etag string) ([]PullReview, string, bool, error) {
@@ -58,8 +59,16 @@ func (g *GitHubReviewFetcher) ListReviews(ctx context.Context, repo string, pr i
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "k8s-agents-session-hub")
-	if g.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+g.Token)
+	tok := g.Token
+	if g.TokenProvider != nil {
+		minted, terr := g.TokenProvider.Token(ctx)
+		if terr != nil {
+			return nil, etag, false, fmt.Errorf("github auth token: %w", terr)
+		}
+		tok = minted
+	}
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	if etag != "" {
 		req.Header.Set("If-None-Match", etag)
