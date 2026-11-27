@@ -57,7 +57,6 @@ jobs:
           import glob, yaml
           paths = sorted(
               glob.glob(".github/workflows/*.yml")
-              + glob.glob("deploy/k8s/*.yaml")
               + ["charts/k8s-agents/Chart.yaml", "charts/k8s-agents/values.yaml"]
           )
           for p in paths:

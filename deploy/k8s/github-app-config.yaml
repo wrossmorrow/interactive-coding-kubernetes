@@ -1,8 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: interactive-github-app-config
-  namespace: interactive-sessions
-data:
-  github_app_id: "5432851"
-  github_app_installation_id: "174275683"
