@@ -96,18 +96,10 @@ func mergeHubMetadata(incoming, existing *sessions.Metadata) {
 		incoming.MaxWakeupsPerHumanTurn = existing.MaxWakeupsPerHumanTurn
 	}
 	incoming.WakeupsSinceHumanTurn = existing.WakeupsSinceHumanTurn
-	if existing.LastProcessedReviewID > incoming.LastProcessedReviewID {
-		incoming.LastProcessedReviewID = existing.LastProcessedReviewID
-	}
-	if existing.LastReviewSessionID != "" {
-		incoming.LastReviewSessionID = existing.LastReviewSessionID
-	}
-	if existing.LastWakeAt != "" {
-		incoming.LastWakeAt = existing.LastWakeAt
-	}
-	if existing.WakeSummary != "" {
-		incoming.WakeSummary = existing.WakeSummary
-	}
+	incoming.LastProcessedReviewID = existing.LastProcessedReviewID
+	incoming.LastReviewSessionID = existing.LastReviewSessionID
+	incoming.LastWakeAt = existing.LastWakeAt
+	incoming.WakeSummary = existing.WakeSummary
 	if existing.Status == sessions.StatusNeedsAttention && incoming.Status == sessions.StatusActive {
 		incoming.Status = sessions.StatusNeedsAttention
 	}

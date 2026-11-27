@@ -428,20 +428,6 @@ func (s *Server) rejoinSession(ctx context.Context, meta *sessions.Metadata) (*s
 
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	meta, err := s.loadMetadata(r.Context(), id)
-	if err != nil {
-		if errors.Is(err, sessions.ErrNotFound) {
-			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "session not found"})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
-		return
-	}
-	if meta.SessionKind.IsAutomated() {
-		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "cannot modify automated CI session settings"})
-		return
-	}
-
 	var req struct {
 		Repo                   *string              `json:"repo"`
 		Branch                 *string              `json:"branch"`
@@ -452,6 +438,39 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "bad request: " + err.Error()})
+		return
+	}
+	if req.PRNumber != nil && *req.PRNumber < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "pr_number must be >= 0"})
+		return
+	}
+	if req.WakePolicy != nil {
+		switch *req.WakePolicy {
+		case sessions.WakePolicyEvaluateAndStage, sessions.WakePolicyAutoPush, sessions.WakePolicyOff:
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "invalid wake_policy"})
+			return
+		}
+	}
+	if req.MaxWakeupsPerHumanTurn != nil && *req.MaxWakeupsPerHumanTurn < 1 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "max_wakeups_per_human_turn must be >= 1 (use wake_policy=off to disable)"})
+		return
+	}
+
+	s.metaMu.Lock()
+	meta, err := s.loadMetadata(r.Context(), id)
+	if err != nil {
+		s.metaMu.Unlock()
+		if errors.Is(err, sessions.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "session not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	if meta.SessionKind.IsAutomated() {
+		s.metaMu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "cannot modify automated CI session settings"})
 		return
 	}
 	if req.Repo != nil {
@@ -467,23 +486,12 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		meta.PRNumber = *req.PRNumber
 	}
 	if req.WakePolicy != nil {
-		switch *req.WakePolicy {
-		case sessions.WakePolicyEvaluateAndStage, sessions.WakePolicyAutoPush, sessions.WakePolicyOff:
-			meta.WakePolicy = *req.WakePolicy
-		default:
-			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "invalid wake_policy"})
-			return
-		}
+		meta.WakePolicy = *req.WakePolicy
 	}
 	if req.MaxWakeupsPerHumanTurn != nil {
-		if *req.MaxWakeupsPerHumanTurn < 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "max_wakeups_per_human_turn must be >= 0"})
-			return
-		}
 		meta.MaxWakeupsPerHumanTurn = *req.MaxWakeupsPerHumanTurn
 	}
 	meta.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	s.metaMu.Lock()
 	err = s.saveMetadata(r.Context(), meta)
 	s.metaMu.Unlock()
 	if err != nil {

@@ -31,7 +31,12 @@ func (s *Server) handleSessionProxy(w http.ResponseWriter, r *http.Request) {
 	// Reset the anti-ping-pong wake-up counter whenever a human sends a turn
 	// through the browser proxy (/s/{id}/api/cmd).
 	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/api/cmd") && r.Body != nil {
-		if body, err := io.ReadAll(io.LimitReader(r.Body, 32<<20)); err == nil {
+		const maxCmdBytes = 32 << 20
+		if body, err := io.ReadAll(io.LimitReader(r.Body, maxCmdBytes+1)); err == nil {
+			if len(body) > maxCmdBytes {
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"success": false, "error": "request body too large"})
+				return
+			}
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			var peek struct {
 				Type string `json:"type"`
