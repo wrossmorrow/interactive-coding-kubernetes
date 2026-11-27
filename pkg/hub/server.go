@@ -473,6 +473,11 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "cannot modify automated CI session settings"})
 		return
 	}
+	if meta.Status == sessions.StatusClosed {
+		s.metaMu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "cannot modify closed session settings"})
+		return
+	}
 	prTargetChanged := false
 	if req.Repo != nil {
 		if trimmed := strings.TrimSpace(*req.Repo); trimmed != meta.Repo {

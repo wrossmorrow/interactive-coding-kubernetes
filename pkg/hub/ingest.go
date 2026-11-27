@@ -107,6 +107,9 @@ func mergeHubMetadata(incoming, existing *sessions.Metadata) {
 	incoming.LastReviewSessionID = existing.LastReviewSessionID
 	incoming.LastWakeAt = existing.LastWakeAt
 	incoming.WakeSummary = existing.WakeSummary
+	if incoming.Status == "" {
+		incoming.Status = existing.Status
+	}
 	if existing.Status == sessions.StatusNeedsAttention && incoming.Status == sessions.StatusActive {
 		incoming.Status = sessions.StatusNeedsAttention
 	}
