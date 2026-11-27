@@ -518,7 +518,7 @@ function showArchiveBanner(meta) {
     const b = el("button", "btn primary", "Fork Session");
     b.onclick = () => forkSession(meta.session_id);
     acts.append(b);
-  } else if (!String(meta.session_kind || "").startsWith("arc-")) {
+  } else if (!meta.session_kind || meta.session_kind === "interactive" || meta.session_kind === "analyst") {
     const b = el("button", "btn primary", "Rejoin Session");
     b.onclick = () => rejoinSession(meta.session_id);
     acts.append(b);

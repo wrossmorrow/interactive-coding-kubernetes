@@ -24,23 +24,25 @@ import (
 
 // Config configures a session-hub Server.
 type Config struct {
-	Store        sessions.Store
-	Spawner      Spawner
-	Catalog      piconfig.Catalog
-	UIFS         fs.FS
-	HubBaseURL   string // Internal URL passed to spawned pi-sessiond instances
-	AllowedHosts []string
+	Store            sessions.Store
+	Spawner          Spawner
+	Catalog          piconfig.Catalog
+	UIFS             fs.FS
+	HubBaseURL       string // Internal URL passed to spawned pi-sessiond instances
+	ArchiveSinkToken string // Shared bearer token for agentrunner POST /internal/archive
+	AllowedHosts     []string
 }
 
 // Server is the session-hub HTTP control plane.
 type Server struct {
-	store        sessions.Store
-	spawner      Spawner
-	catalog      piconfig.Catalog
-	uiFS         fs.FS
-	hubBaseURL   string
-	allowedHosts map[string]bool
-	tokens       *TokenManager
+	store            sessions.Store
+	spawner          Spawner
+	catalog          piconfig.Catalog
+	uiFS             fs.FS
+	hubBaseURL       string
+	archiveSinkToken string
+	allowedHosts     map[string]bool
+	tokens           *TokenManager
 
 	subsMu sync.Mutex
 	subs   map[chan []byte]struct{}
@@ -58,14 +60,15 @@ func NewServer(cfg Config) *Server {
 		cfg.Catalog = piconfig.DefaultCatalog()
 	}
 	return &Server{
-		store:        cfg.Store,
-		spawner:      cfg.Spawner,
-		catalog:      cfg.Catalog,
-		uiFS:         cfg.UIFS,
-		hubBaseURL:   strings.TrimRight(cfg.HubBaseURL, "/"),
-		allowedHosts: hosts,
-		tokens:       NewTokenManager(),
-		subs:         map[chan []byte]struct{}{},
+		store:            cfg.Store,
+		spawner:          cfg.Spawner,
+		catalog:          cfg.Catalog,
+		uiFS:             cfg.UIFS,
+		hubBaseURL:       strings.TrimRight(cfg.HubBaseURL, "/"),
+		archiveSinkToken: strings.TrimSpace(cfg.ArchiveSinkToken),
+		allowedHosts:     hosts,
+		tokens:           NewTokenManager(),
+		subs:             map[chan []byte]struct{}{},
 	}
 }
 
@@ -90,7 +93,8 @@ func (s *Server) NotifyExit(sessionID string) {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
-	// Internal sandbox ingest API (bearer-authenticated, no browser Host guard).
+	// Internal sandbox ingest API + agentrunner multipart archive sink (bearer-authenticated).
+	mux.HandleFunc("POST /internal/archive", s.handleInternalArchive)
 	mux.HandleFunc("PUT /internal/sessions/{id}/objects/{path...}", s.handleInternalPutObject)
 	mux.HandleFunc("GET /internal/sessions/{id}/objects/{path...}", s.handleInternalGetObject)
 	mux.HandleFunc("GET /internal/sessions/{id}/objects", s.handleInternalListObjects)

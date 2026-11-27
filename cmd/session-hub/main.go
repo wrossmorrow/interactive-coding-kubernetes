@@ -37,6 +37,7 @@ func main() {
 		piBin            = flag.String("pi-bin", envOr("PI_BIN", "pi"), "pi binary passed to LocalSpawner")
 		piArgs           = flag.String("pi-args", os.Getenv("PI_ARGS"), "optional override args for pi")
 		modelCatalog     = flag.String("model-catalog", os.Getenv("PI_MODEL_CATALOG"), "optional JSON model catalog path")
+		archiveSinkToken = flag.String("archive-sink-token", os.Getenv("SESSION_SINK_TOKEN"), "bearer token accepted on POST /internal/archive for agentrunner CI archives")
 		allowedHosts     = flag.String("allowed-hosts", os.Getenv("SESSION_HUB_ALLOWED_HOSTS"), "comma-separated extra allowed Host headers")
 		flushIntervalSec = flag.Int("flush-interval", 30, "periodic flush interval (seconds) for spawned daemons")
 
@@ -132,12 +133,13 @@ func main() {
 	}
 
 	srv = hub.NewServer(hub.Config{
-		Store:        store,
-		Spawner:      spawner,
-		Catalog:      cat,
-		UIFS:         ui.FS(),
-		HubBaseURL:   hubBaseURL,
-		AllowedHosts: strings.Split(*allowedHosts, ","),
+		Store:            store,
+		Spawner:          spawner,
+		Catalog:          cat,
+		UIFS:             ui.FS(),
+		HubBaseURL:       hubBaseURL,
+		ArchiveSinkToken: *archiveSinkToken,
+		AllowedHosts:     strings.Split(*allowedHosts, ","),
 	})
 
 	httpSrv := &http.Server{

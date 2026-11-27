@@ -24,21 +24,28 @@ const (
 )
 
 // Kind distinguishes interactive developer sessions from automated CI runs
-// and read-only analyst sessions.
+// and read-only analyst sessions. Automated kinds defer to agentrunner's
+// deriveSessionKind values ("review", "suggest", "release-draft", "write-branch").
 type Kind string
 
 const (
-	KindInteractive Kind = "interactive"
-	KindAnalyst     Kind = "analyst"
-	KindArcReview   Kind = "arc-review"
-	KindArcSuggest  Kind = "arc-suggest"
-	KindArcRelease  Kind = "arc-release"
+	KindInteractive  Kind = "interactive"
+	KindAnalyst      Kind = "analyst"
+	KindReview       Kind = "review"
+	KindSuggest      Kind = "suggest"
+	KindReleaseDraft Kind = "release-draft"
+	KindWriteBranch  Kind = "write-branch"
 )
 
 // IsAutomated reports whether k represents a CI/ARC runner session that must
 // never be resumed as an interactive author session.
 func (k Kind) IsAutomated() bool {
-	return strings.HasPrefix(string(k), "arc-")
+	switch k {
+	case "", KindInteractive, KindAnalyst:
+		return false
+	default:
+		return true
+	}
 }
 
 const (
@@ -61,8 +68,17 @@ type Metadata struct {
 	Status           Status         `json:"status"`
 	Repo             string         `json:"repo,omitempty"`
 	Branch           string         `json:"branch,omitempty"`
+	BaseRef          string         `json:"base_ref,omitempty"`
 	HeadSHA          string         `json:"head_sha,omitempty"`
 	PRNumber         int            `json:"pr_number,omitempty"`
+	IssueNumber      int            `json:"issue_number,omitempty"`
+	RunID            string         `json:"run_id,omitempty"`
+	Tag              string         `json:"tag,omitempty"`
+	Mode             string         `json:"mode,omitempty"`
+	Output           string         `json:"output,omitempty"`
+	Verdict          string         `json:"verdict,omitempty"`
+	Findings         int            `json:"findings,omitempty"`
+	Turns            int            `json:"turns,omitempty"`
 	Toolchain        string         `json:"toolchain,omitempty"`
 	ForkedFrom       string         `json:"forked_from,omitempty"`
 	WakeSummary      string         `json:"wake_summary,omitempty"`
