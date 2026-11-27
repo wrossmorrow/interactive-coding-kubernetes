@@ -51,8 +51,15 @@ dev port="8787":
 
 # build a thin interactive sandbox image layered on an agentrunner toolchain image
 containerize-sandbox toolchain="agent" tag="latest" agentrunner_tag="latest" *args="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{ toolchain }}" in
+        java17) base_image="{{ image_repository }}/agentrunner-java:17" ;;
+        java21) base_image="{{ image_repository }}/agentrunner-java:21" ;;
+        *)      base_image="{{ image_repository }}/agentrunner-{{ toolchain }}:{{ agentrunner_tag }}" ;;
+    esac
     docker build -f images/sandbox/Dockerfile \
-        --build-arg "BASE_IMAGE={{ image_repository }}/agentrunner-{{ toolchain }}:{{ agentrunner_tag }}" \
+        --build-arg "BASE_IMAGE=${base_image}" \
         {{ args }} \
         -t "{{ image_repository }}/{{ image_name_prefix }}-sandbox-{{ toolchain }}:{{ tag }}" .
 

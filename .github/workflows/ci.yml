@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go & E2E checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: extractions/setup-just@v4
+
+      - name: Run validation suite
+        run: just check
+
+  lint:
+    name: Lint workflows & K8s manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
+
+      - name: Lint GitHub Actions workflows
+        run: actionlint
+
+      - name: Validate YAML manifests
+        run: |
+          python3 -c '
+          import glob, yaml
+          paths = sorted(
+              glob.glob(".github/workflows/*.yml")
+              + glob.glob("deploy/k8s/*.yaml")
+          )
+          for p in paths:
+              with open(p, "r", encoding="utf-8") as f:
+                  list(yaml.safe_load_all(f))
+              print(f"ok: {p}")
+          '
