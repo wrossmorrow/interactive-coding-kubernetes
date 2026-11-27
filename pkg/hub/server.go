@@ -457,6 +457,8 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	running := s.spawner != nil && s.spawner.Running(id)
+
 	s.metaMu.Lock()
 	meta, err := s.loadMetadata(r.Context(), id)
 	if err != nil {
@@ -468,9 +470,9 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
 		return
 	}
-	if meta.SessionKind.IsAutomated() {
+	if meta.SessionKind != "" && meta.SessionKind != sessions.KindInteractive {
 		s.metaMu.Unlock()
-		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "cannot modify automated CI session settings"})
+		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "PR wake-up settings are only supported on interactive sessions"})
 		return
 	}
 	if meta.Status == sessions.StatusClosed {
@@ -507,7 +509,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		meta.WakeSummary = ""
 		meta.LastWakeAt = ""
 		if meta.Status == sessions.StatusNeedsAttention {
-			if s.spawner != nil && s.spawner.Running(id) {
+			if running {
 				meta.Status = sessions.StatusActive
 			} else {
 				meta.Status = sessions.StatusPaused
@@ -527,7 +529,7 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
 		return
 	}
-	meta.Running = s.spawner != nil && s.spawner.Running(id)
+	meta.Running = running
 	s.broadcastSessionUpdate(meta)
 	writeJSON(w, http.StatusOK, meta)
 }

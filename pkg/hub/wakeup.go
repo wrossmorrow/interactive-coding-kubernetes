@@ -328,20 +328,21 @@ func (s *Server) TriggerWakeup(ctx context.Context, meta *sessions.Metadata, rev
 	}
 
 	prompt := BuildWakeupPrompt(meta, rev)
-	cmdPayload := map[string]any{
-		"type":              "prompt",
-		"message":           prompt,
-		"streamingBehavior": "followUp",
-	}
-	if err := s.postDaemonJSON(ctx, meta.SessionID, endpoint+"/api/cmd", cmdPayload); err != nil {
-		return fmt.Errorf("inject wakeup prompt: %w", err)
-	}
-
 	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Commit wake-up bookkeeping before injecting the prompt so a store error
+	// never causes duplicate prompt injection on the next poll tick.
 	s.metaMu.Lock()
 	if latestMeta, lerr := s.loadMetadata(ctx, meta.SessionID); lerr == nil && latestMeta != nil {
 		meta = latestMeta
 	}
+	prevWakeups := meta.WakeupsSinceHumanTurn
+	prevReviewID := meta.LastProcessedReviewID
+	prevStatus := meta.Status
+	prevSummary := meta.WakeSummary
+	prevRevSess := meta.LastReviewSessionID
+	prevWakeAt := meta.LastWakeAt
+
 	meta.WakeupsSinceHumanTurn++
 	meta.LastProcessedReviewID = rev.ID
 	if reviewSessID := ParseAgentrunnerSessionID(rev.Body); reviewSessID != "" {
@@ -360,6 +361,28 @@ func (s *Server) TriggerWakeup(ctx context.Context, meta *sessions.Metadata, rev
 	if saveErr != nil {
 		return saveErr
 	}
+
+	cmdPayload := map[string]any{
+		"type":              "prompt",
+		"message":           prompt,
+		"streamingBehavior": "followUp",
+	}
+	if err := s.postDaemonJSON(ctx, meta.SessionID, endpoint+"/api/cmd", cmdPayload); err != nil {
+		// Roll back wake-up bookkeeping so the next poll tick can retry cleanly.
+		s.metaMu.Lock()
+		if cur, lerr := s.loadMetadata(ctx, meta.SessionID); lerr == nil && cur != nil {
+			cur.WakeupsSinceHumanTurn = prevWakeups
+			cur.LastProcessedReviewID = prevReviewID
+			cur.Status = prevStatus
+			cur.WakeSummary = prevSummary
+			cur.LastReviewSessionID = prevRevSess
+			cur.LastWakeAt = prevWakeAt
+			_ = s.saveMetadata(ctx, cur)
+		}
+		s.metaMu.Unlock()
+		return fmt.Errorf("inject wakeup prompt: %w", err)
+	}
+
 	meta.Running = true
 	s.broadcastSessionUpdate(meta)
 	return nil

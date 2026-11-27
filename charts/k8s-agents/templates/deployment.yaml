@@ -59,7 +59,6 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.wakeup.githubTokenSecretName }}
                   key: {{ .Values.wakeup.githubTokenSecretKey | default "token" }}
-                  optional: true
             {{- end }}
             {{- if .Values.sessionSink.secretName }}
             - name: SESSION_SINK_TOKEN
