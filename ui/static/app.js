@@ -600,15 +600,43 @@ function refreshStats() {
 
 // ---------------------------------------------------------------- lifecycle actions
 
+let busyTimer = 0;
+function startBusy(message) {
+  stopBusy();
+  const banner = $("#busy-banner");
+  const msgEl = $("#busy-msg");
+  const elapsedEl = $("#busy-elapsed");
+  const started = Date.now();
+  msgEl.textContent = message;
+  elapsedEl.textContent = "0s";
+  banner.hidden = false;
+  $("#btn-new").disabled = true;
+  busyTimer = setInterval(() => {
+    elapsedEl.textContent = Math.floor((Date.now() - started) / 1000) + "s";
+  }, 500);
+}
+
+function stopBusy() {
+  clearInterval(busyTimer);
+  busyTimer = 0;
+  $("#busy-banner").hidden = true;
+  $("#btn-new").disabled = false;
+}
+
 async function pauseCurrentSession() {
   if (!H.currentId) return;
   const id = H.currentId;
-  const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/pause`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
-  });
-  if (!r.ok) { notice("error", "pause failed"); return; }
-  await loadSessions();
-  await selectSession(id, true);
+  startBusy("Pausing session and saving workspace…");
+  try {
+    const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/pause`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    if (!r.ok) { notice("error", "pause failed"); return; }
+    await loadSessions();
+    await selectSession(id, true);
+  } finally {
+    stopBusy();
+  }
 }
 
 async function closeCurrentSession() {
@@ -617,35 +645,50 @@ async function closeCurrentSession() {
 }
 
 async function closeSessionById(id) {
-  const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/close`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
-  });
-  if (!r.ok) { notice("error", "close failed"); return; }
-  await loadSessions();
-  await selectSession(id, true);
+  startBusy("Closing and compacting session archive…");
+  try {
+    const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/close`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    if (!r.ok) { notice("error", "close failed"); return; }
+    await loadSessions();
+    await selectSession(id, true);
+  } finally {
+    stopBusy();
+  }
 }
 
 async function rejoinSession(id) {
-  const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/rejoin`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
-  });
-  if (!r.ok) {
-    const j = await r.json().catch(() => ({}));
-    notice("error", "rejoin failed: " + (j.error || r.statusText));
-    return;
+  startBusy("Provisioning sandbox pod & restoring workspace…");
+  try {
+    const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/rejoin`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      notice("error", "rejoin failed: " + (j.error || r.statusText));
+      return;
+    }
+    await loadSessions();
+    await selectSession(id, true);
+  } finally {
+    stopBusy();
   }
-  await loadSessions();
-  await selectSession(id, true);
 }
 
 async function forkSession(id) {
-  const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/fork`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
-  });
-  if (!r.ok) { notice("error", "fork failed"); return; }
-  const created = await r.json();
-  await loadSessions();
-  await selectSession(created.session_id, true);
+  startBusy("Forking session & provisioning sandbox pod…");
+  try {
+    const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/fork`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    if (!r.ok) { notice("error", "fork failed"); return; }
+    const created = await r.json();
+    await loadSessions();
+    await selectSession(created.session_id, true);
+  } finally {
+    stopBusy();
+  }
 }
 
 // ---------------------------------------------------------------- inbox sidebar & hub SSE
@@ -733,20 +776,26 @@ $("#new-modal").addEventListener("submit", async (e) => {
     model,
   };
   $("#modal-backdrop").hidden = true;
-  const r = await fetch("/api/sessions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!r.ok) {
-    const j = await r.json().catch(() => ({}));
-    notice("error", "create session failed: " + (j.error || r.statusText));
-    return;
+  const label = payload.name ? ` (${payload.name})` : "";
+  startBusy(`Provisioning sandbox pod${label}…`);
+  try {
+    const r = await fetch("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      notice("error", "create session failed: " + (j.error || r.statusText));
+      return;
+    }
+    const created = await r.json();
+    $("#nm-name").value = "";
+    await loadSessions();
+    await selectSession(created.session_id, true);
+  } finally {
+    stopBusy();
   }
-  const created = await r.json();
-  $("#nm-name").value = "";
-  await loadSessions();
-  await selectSession(created.session_id, true);
 });
 
 // ---------------------------------------------------------------- editor, dialogs & footer

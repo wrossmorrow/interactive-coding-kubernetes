@@ -121,7 +121,15 @@ func (s *Server) Routes() http.Handler {
 	pub.HandleFunc("POST /s/{id}/{rest...}", s.handleSessionProxy)
 
 	if s.uiFS != nil {
-		pub.Handle("GET /", http.FileServer(http.FS(s.uiFS)))
+		fsHandler := http.FileServer(http.FS(s.uiFS))
+		pub.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/vendor/") {
+				w.Header().Set("Cache-Control", "public, max-age=86400")
+			} else {
+				w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			}
+			fsHandler.ServeHTTP(w, r)
+		}))
 	}
 
 	mux.Handle("/", s.guard(pub))
