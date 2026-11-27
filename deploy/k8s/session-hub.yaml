@@ -28,13 +28,14 @@ spec:
             - --k8s-model-catalog-configmap=session-model-catalog
           env:
             - name: SESSION_GCS_BUCKET
-              value: "REPLACE_WITH_SESSIONS_BUCKET"
+              value: "agentrunner-515823-agentreview-sessions"
             - name: K8S_GATEWAY_SECRET
               value: "agent-gateway-token"
-            - name: K8S_GITHUB_APP_SECRET
-              value: "interactive-github-app"
-            - name: K8S_GITHUB_APP_CONFIGMAP
-              value: "interactive-github-app-config"
+            # Uncomment once the interactive author GitHub App Secret/ConfigMap exist in interactive-sessions:
+            # - name: K8S_GITHUB_APP_SECRET
+            #   value: "interactive-github-app"
+            # - name: K8S_GITHUB_APP_CONFIGMAP
+            #   value: "interactive-github-app-config"
           ports:
             - name: http
               containerPort: 8787

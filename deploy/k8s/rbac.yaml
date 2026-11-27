@@ -6,7 +6,7 @@ metadata:
   annotations:
     # Bind to the dedicated GCS-only GCP Service Account (Workload Identity).
     # Replace PROJECT_ID and CLUSTER_NAME via Kustomize overlay or patch.
-    iam.gke.io/gcp-service-account: "CLUSTER_NAME-session-hub@PROJECT_ID.iam.gserviceaccount.com"
+    iam.gke.io/gcp-service-account: "agentreview-session-hub@agentrunner-515823.iam.gserviceaccount.com"
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

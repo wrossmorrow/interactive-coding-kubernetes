@@ -93,6 +93,9 @@ func (s *Server) NotifyExit(sessionID string) {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
+	// Health probe (exempt from browser Host guard so Kubernetes kubelet PodIP probes succeed).
+	mux.HandleFunc("GET /api/health", s.handleHealth)
+
 	// Internal sandbox ingest API + agentrunner multipart archive sink (bearer-authenticated).
 	mux.HandleFunc("POST /internal/archive", s.handleInternalArchive)
 	mux.HandleFunc("PUT /internal/sessions/{id}/objects/{path...}", s.handleInternalPutObject)
@@ -102,7 +105,6 @@ func (s *Server) Routes() http.Handler {
 
 	// Browser-facing control plane + live session proxy + decoupled SPA.
 	pub := http.NewServeMux()
-	pub.HandleFunc("GET /api/health", s.handleHealth)
 	pub.HandleFunc("GET /api/models", s.handleModels)
 	pub.HandleFunc("GET /api/hub/events", s.handleHubEvents)
 	pub.HandleFunc("GET /api/sessions", s.handleListSessions)
