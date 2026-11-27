@@ -237,7 +237,10 @@ func (w *WakeWatcher) PollOnce(ctx context.Context) {
 		if err := json.Unmarshal(b, &meta); err != nil {
 			continue
 		}
-		if err := w.checkSession(ctx, &meta); err != nil {
+		sessCtx, sessCancel := context.WithTimeout(ctx, 2*time.Minute)
+		err = w.checkSession(sessCtx, &meta)
+		sessCancel()
+		if err != nil {
 			log.Printf("wakeup check session %s error: %v", meta.SessionID, err)
 		}
 	}

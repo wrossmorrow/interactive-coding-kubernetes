@@ -119,6 +119,9 @@ spec:
         - name: gh-app-key
           secret:
             secretName: {{ .Values.wakeup.githubAppSecretName }}
+            items:
+              - key: {{ .Values.wakeup.githubAppKeyFile | default "private-key.pem" }}
+                path: {{ .Values.wakeup.githubAppKeyFile | default "private-key.pem" }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
