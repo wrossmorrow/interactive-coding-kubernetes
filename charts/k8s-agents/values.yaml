@@ -41,7 +41,7 @@ sessionSink:
 # Preferred: sync the interactive GitHub App PEM into the release namespace as
 # `githubAppSecretName` (reuses sandbox.githubApp.appId & installationId).
 wakeup:
-  intervalSeconds: 60
+  intervalSeconds: 0
   githubAppSecretName: ""
   githubAppKeyFile: private-key.pem
   githubTokenSecretName: ""

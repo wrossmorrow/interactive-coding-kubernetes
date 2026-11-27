@@ -473,29 +473,39 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "cannot modify automated CI session settings"})
 		return
 	}
+	prTargetChanged := false
 	if req.Repo != nil {
-		meta.Repo = strings.TrimSpace(*req.Repo)
+		if trimmed := strings.TrimSpace(*req.Repo); trimmed != meta.Repo {
+			meta.Repo = trimmed
+			prTargetChanged = true
+		}
 	}
 	if req.Branch != nil {
 		meta.Branch = strings.TrimSpace(*req.Branch)
 	}
 	if req.HeadSHA != nil {
-		meta.HeadSHA = strings.TrimSpace(*req.HeadSHA)
+		if trimmed := strings.TrimSpace(*req.HeadSHA); trimmed != meta.HeadSHA {
+			meta.HeadSHA = trimmed
+			prTargetChanged = true
+		}
 	}
 	if req.PRNumber != nil {
 		if *req.PRNumber != meta.PRNumber {
 			meta.PRNumber = *req.PRNumber
-			meta.LastProcessedReviewID = 0
-			meta.WakeupsSinceHumanTurn = 0
-			meta.LastReviewSessionID = ""
-			meta.WakeSummary = ""
-			meta.LastWakeAt = ""
-			if meta.Status == sessions.StatusNeedsAttention {
-				if s.spawner != nil && s.spawner.Running(id) {
-					meta.Status = sessions.StatusActive
-				} else {
-					meta.Status = sessions.StatusPaused
-				}
+			prTargetChanged = true
+		}
+	}
+	if prTargetChanged {
+		meta.LastProcessedReviewID = 0
+		meta.WakeupsSinceHumanTurn = 0
+		meta.LastReviewSessionID = ""
+		meta.WakeSummary = ""
+		meta.LastWakeAt = ""
+		if meta.Status == sessions.StatusNeedsAttention {
+			if s.spawner != nil && s.spawner.Running(id) {
+				meta.Status = sessions.StatusActive
+			} else {
+				meta.Status = sessions.StatusPaused
 			}
 		}
 	}

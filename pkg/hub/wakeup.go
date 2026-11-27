@@ -257,7 +257,7 @@ func (w *WakeWatcher) checkSession(ctx context.Context, meta *sessions.Metadata)
 		return nil
 	}
 
-	prKey := fmt.Sprintf("%s#%d", meta.Repo, meta.PRNumber)
+	prKey := fmt.Sprintf("%s#%d#%s", meta.Repo, meta.PRNumber, meta.SessionID)
 	w.mu.Lock()
 	etag := w.etags[prKey]
 	w.mu.Unlock()
