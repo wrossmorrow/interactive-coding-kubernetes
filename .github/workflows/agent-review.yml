@@ -1,0 +1,71 @@
+name: Agent Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - 'docs/**'
+      - 'testdata/*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      ${{
+        !github.event.pull_request.draft &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.actor != 'dependabot[bot]' &&
+        github.actor != 'renovate[bot]' &&
+        !contains(github.event.pull_request.labels.*.name, 'skip-agent-review') &&
+        !contains(github.event.pull_request.title, '[skip review]')
+      }}
+    runs-on: interactive-coding-kubernetes-review
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: gate
+        run: |
+          commit_msg="$(git log -1 --pretty=%B HEAD^2 2>/dev/null || git log -1 --pretty=%B HEAD)"
+          if printf '%s\n' "$commit_msg" | grep -qiE '\[skip (agent-)?review\]'; then
+            echo "::notice::Skipping agent review due to commit opt-out marker."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.gate.outputs.skip != 'true'
+        uses: ./action
+        with:
+          instructions: |
+            Review the PR diff against ${{ github.base_ref }}.
+            Deterministic checks (gofmt, go vet, go test -race, helm lint, actionlint, CRD diff)
+            already run in CI—do NOT spend turns repeating style or formatting nits.
+
+            Focus on:
+            1. Security & isolation boundaries: ensure secrets/tokens never leak into the stock
+               `runner` container, and RBAC, NetworkPolicy, Squid allowlists, and CRD validation
+               remain least-privilege.
+            2. Cross-layer consistency: if CRD types, controller behavior, or action inputs change,
+               check that validation, pkg/render, config/crd schemas, Helm chart templates/schema,
+               and docs stay consistent.
+            3. Reliability & edge cases: look for subtle bugs in controller reconciliation, RPC/process
+               lifecycle, error handling, or missing unit tests for new behavior.
+
+            Only emit `error` severity for concrete bugs, security regressions, or broken invariants.
+            For small, locally verified fixes inside a single diff hunk, you may include a
+            "suggestion" (and optional "startLine" < "line") on the inline comment.
+          fail-on: error
+          output: suggest
