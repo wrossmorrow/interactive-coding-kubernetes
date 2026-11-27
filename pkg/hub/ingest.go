@@ -48,18 +48,69 @@ func (s *Server) handleInternalPutObject(w http.ResponseWriter, r *http.Request)
 	}
 	key := "sessions/" + id + "/" + rel
 	ct := r.Header.Get("Content-Type")
+	if rel == "metadata.json" {
+		// Merge incoming daemon metadata with hub-owned control-plane fields
+		// (PR linkage, wake policy, anti-ping-pong counters, needs-attention) so
+		// periodic daemon flushes never clobber hub state.
+		var incoming sessions.Metadata
+		if err := json.Unmarshal(body, &incoming); err == nil {
+			s.metaMu.Lock()
+			if existing, lerr := s.loadMetadata(r.Context(), id); lerr == nil && existing != nil {
+				mergeHubMetadata(&incoming, existing)
+			}
+			err = s.saveMetadata(r.Context(), &incoming)
+			s.metaMu.Unlock()
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			incoming.Running = s.spawner != nil && s.spawner.Running(id)
+			s.broadcastSessionUpdate(&incoming)
+			writeJSON(w, http.StatusOK, map[string]any{"success": true, "key": key})
+			return
+		}
+	}
 	if err := s.store.Put(r.Context(), key, body, ct); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
 		return
 	}
-	if rel == "metadata.json" {
-		var meta sessions.Metadata
-		if err := json.Unmarshal(body, &meta); err == nil {
-			meta.Running = s.spawner.Running(id)
-			s.broadcastSessionUpdate(&meta)
-		}
-	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "key": key})
+}
+
+// mergeHubMetadata preserves hub-owned control-plane fields on incoming daemon
+// metadata flushes. Daemon-driven transitions to paused or closed still win.
+func mergeHubMetadata(incoming, existing *sessions.Metadata) {
+	if incoming.SessionID == "" {
+		incoming.SessionID = existing.SessionID
+	}
+	if incoming.ForkedFrom == "" {
+		incoming.ForkedFrom = existing.ForkedFrom
+	}
+	if incoming.PRNumber == 0 && existing.PRNumber > 0 {
+		incoming.PRNumber = existing.PRNumber
+	}
+	if existing.WakePolicy != "" {
+		incoming.WakePolicy = existing.WakePolicy
+	}
+	if existing.MaxWakeupsPerHumanTurn > 0 {
+		incoming.MaxWakeupsPerHumanTurn = existing.MaxWakeupsPerHumanTurn
+	}
+	incoming.WakeupsSinceHumanTurn = existing.WakeupsSinceHumanTurn
+	if existing.LastProcessedReviewID > incoming.LastProcessedReviewID {
+		incoming.LastProcessedReviewID = existing.LastProcessedReviewID
+	}
+	if existing.LastReviewSessionID != "" {
+		incoming.LastReviewSessionID = existing.LastReviewSessionID
+	}
+	if existing.LastWakeAt != "" {
+		incoming.LastWakeAt = existing.LastWakeAt
+	}
+	if existing.WakeSummary != "" {
+		incoming.WakeSummary = existing.WakeSummary
+	}
+	if existing.Status == sessions.StatusNeedsAttention && incoming.Status == sessions.StatusActive {
+		incoming.Status = sessions.StatusNeedsAttention
+	}
 }
 
 func (s *Server) handleInternalGetObject(w http.ResponseWriter, r *http.Request) {

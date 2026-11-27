@@ -243,3 +243,80 @@ func TestGitHubAppTokenProviderMintsAndCachesToken(t *testing.T) {
 		t.Fatalf("expected cached token (1 HTTP call), got %d calls", calls)
 	}
 }
+
+func TestDaemonMetadataFlushPreservesHubWakeupFields(t *testing.T) {
+	store, err := sessions.NewDirStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawner := &fakeSpawner{endpoint: "http://127.0.0.1:9999", running: map[string]bool{"sess-merge-1": true}}
+	srv := hub.NewServer(hub.Config{
+		Store:   store,
+		Spawner: spawner,
+		TokenLookup: func(id string) (string, bool) {
+			if id == "sess-merge-1" {
+				return "tok-merge", true
+			}
+			return "", false
+		},
+	})
+
+	// Seed hub metadata after a PR wake-up (needs-attention + counter=1 + review link).
+	hubMeta := sessions.Metadata{
+		SessionID:              "sess-merge-1",
+		SessionKind:            sessions.KindInteractive,
+		Status:                 sessions.StatusNeedsAttention,
+		Repo:                   "wrossmorrow/k8s-agents",
+		PRNumber:               42,
+		WakePolicy:             sessions.WakePolicyEvaluateAndStage,
+		MaxWakeupsPerHumanTurn: 1,
+		WakeupsSinceHumanTurn:  1,
+		LastProcessedReviewID:  555,
+		LastReviewSessionID:    "ar-rev-555",
+		WakeSummary:            "Woken by CHANGES_REQUESTED",
+	}
+	hb, _ := json.Marshal(hubMeta)
+	if err := store.Put(context.Background(), sessions.MetadataKey("sess-merge-1"), hb, sessions.JSONContentType); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate pi-sessiond periodic flush sending stale status="active" and zeroed wake fields.
+	daemonFlush := sessions.Metadata{
+		SessionID:  "sess-merge-1",
+		Status:     sessions.StatusActive,
+		LastOffset: 2048,
+		PartCount:  3,
+	}
+	db, _ := json.Marshal(daemonFlush)
+	req := httptest.NewRequest(http.MethodPut, "/internal/sessions/sess-merge-1/objects/metadata.json", strings.NewReader(string(db)))
+	req.Header.Set("Authorization", "Bearer tok-merge")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("daemon metadata PUT status = %d: %s", w.Code, w.Body.String())
+	}
+
+	gotBytes, err := store.Get(context.Background(), sessions.MetadataKey("sess-merge-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got sessions.Metadata
+	_ = json.Unmarshal(gotBytes, &got)
+	if got.Status != sessions.StatusNeedsAttention || got.WakeupsSinceHumanTurn != 1 || got.LastProcessedReviewID != 555 || got.LastReviewSessionID != "ar-rev-555" || got.PRNumber != 42 {
+		t.Fatalf("hub wake-up fields were clobbered by daemon flush: %+v", got)
+	}
+	if got.LastOffset != 2048 || got.PartCount != 3 {
+		t.Fatalf("daemon upload progress fields were lost: %+v", got)
+	}
+
+	// Also verify negative max_wakeups_per_human_turn returns 400.
+	badReq := httptest.NewRequest(http.MethodPost, "/api/sessions/sess-merge-1/settings", strings.NewReader(`{"max_wakeups_per_human_turn":-1}`))
+	badReq.Host = "localhost"
+	badReq.Header.Set("Content-Type", "application/json")
+	badW := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(badW, badReq)
+	if badW.Code != http.StatusBadRequest {
+		t.Fatalf("negative max_wakeups_per_human_turn status = %d, want 400", badW.Code)
+	}
+}

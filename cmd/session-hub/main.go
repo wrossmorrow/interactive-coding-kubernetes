@@ -153,17 +153,25 @@ func main() {
 
 	if *wakeupInterval > 0 {
 		var fetcher *hub.GitHubReviewFetcher
+		appID := strings.TrimSpace(*githubAppID)
+		installID := strings.TrimSpace(*githubInstallID)
+		keyPath := strings.TrimSpace(*githubKeyPath)
+		staticTok := strings.TrimSpace(*githubToken)
 		switch {
-		case strings.TrimSpace(*githubAppID) != "" && strings.TrimSpace(*githubInstallID) != "" && strings.TrimSpace(*githubKeyPath) != "":
-			tp, err := hub.NewGitHubAppTokenProviderFromFile(*githubAppID, *githubInstallID, *githubKeyPath, "")
+		case appID != "" && installID != "" && keyPath != "":
+			tp, err := hub.NewGitHubAppTokenProviderFromFile(appID, installID, keyPath, "")
 			if err != nil {
 				log.Fatalf("init github app token provider: %v", err)
 			}
 			fetcher = &hub.GitHubReviewFetcher{TokenProvider: tp}
-			log.Printf("PR review wake-up watcher enabled via GitHub App %s (interval=%ds)", *githubAppID, *wakeupInterval)
-		case strings.TrimSpace(*githubToken) != "":
-			fetcher = &hub.GitHubReviewFetcher{Token: strings.TrimSpace(*githubToken)}
+			log.Printf("PR review wake-up watcher enabled via GitHub App %s (interval=%ds)", appID, *wakeupInterval)
+		case appID != "" || installID != "" || keyPath != "":
+			log.Printf("WARNING: PR review wake-up watcher disabled due to incomplete GitHub App config (appID=%v, installationID=%v, keyPath=%v)", appID != "", installID != "", keyPath != "")
+		case staticTok != "":
+			fetcher = &hub.GitHubReviewFetcher{Token: staticTok}
 			log.Printf("PR review wake-up watcher enabled via static token (interval=%ds)", *wakeupInterval)
+		default:
+			log.Printf("PR review wake-up watcher disabled (no GitHub App or GITHUB_TOKEN configured)")
 		}
 		if fetcher != nil {
 			watcher := hub.NewWakeWatcher(srv, fetcher, time.Duration(*wakeupInterval)*time.Second)

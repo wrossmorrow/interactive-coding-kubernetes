@@ -45,6 +45,8 @@ type Server struct {
 	allowedHosts     map[string]bool
 	tokens           *TokenManager
 
+	metaMu sync.Mutex
+
 	subsMu sync.Mutex
 	subs   map[chan []byte]struct{}
 }
@@ -473,11 +475,18 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.MaxWakeupsPerHumanTurn != nil && *req.MaxWakeupsPerHumanTurn >= 0 {
+	if req.MaxWakeupsPerHumanTurn != nil {
+		if *req.MaxWakeupsPerHumanTurn < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "max_wakeups_per_human_turn must be >= 0"})
+			return
+		}
 		meta.MaxWakeupsPerHumanTurn = *req.MaxWakeupsPerHumanTurn
 	}
 	meta.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	if err := s.saveMetadata(r.Context(), meta); err != nil {
+	s.metaMu.Lock()
+	err = s.saveMetadata(r.Context(), meta)
+	s.metaMu.Unlock()
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
 		return
 	}
@@ -491,8 +500,10 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) resetHumanTurn(sessionID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	s.metaMu.Lock()
 	meta, err := s.loadMetadata(ctx, sessionID)
 	if err != nil || meta == nil {
+		s.metaMu.Unlock()
 		return
 	}
 	changed := false
@@ -506,10 +517,13 @@ func (s *Server) resetHumanTurn(sessionID string) {
 		changed = true
 	}
 	if !changed {
+		s.metaMu.Unlock()
 		return
 	}
 	meta.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	if err := s.saveMetadata(ctx, meta); err == nil {
+	saveErr := s.saveMetadata(ctx, meta)
+	s.metaMu.Unlock()
+	if saveErr == nil {
 		meta.Running = s.spawner != nil && s.spawner.Running(sessionID)
 		s.broadcastSessionUpdate(meta)
 	}

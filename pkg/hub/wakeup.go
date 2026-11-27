@@ -328,6 +328,10 @@ func (s *Server) TriggerWakeup(ctx context.Context, meta *sessions.Metadata, rev
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
+	s.metaMu.Lock()
+	if latestMeta, lerr := s.loadMetadata(ctx, meta.SessionID); lerr == nil && latestMeta != nil {
+		meta = latestMeta
+	}
 	meta.WakeupsSinceHumanTurn++
 	meta.LastProcessedReviewID = rev.ID
 	if reviewSessID := ParseAgentrunnerSessionID(rev.Body); reviewSessID != "" {
@@ -341,8 +345,10 @@ func (s *Server) TriggerWakeup(ctx context.Context, meta *sessions.Metadata, rev
 		meta.Status = sessions.StatusActive
 	}
 	meta.UpdatedAt = now
-	if err := s.saveMetadata(ctx, meta); err != nil {
-		return err
+	saveErr := s.saveMetadata(ctx, meta)
+	s.metaMu.Unlock()
+	if saveErr != nil {
+		return saveErr
 	}
 	meta.Running = true
 	s.broadcastSessionUpdate(meta)

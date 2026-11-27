@@ -69,8 +69,12 @@ function sessionAPI(path) {
   return `/s/${encodeURIComponent(H.currentId)}${path}`;
 }
 
+function isLiveSession(meta) {
+  return !!(meta && meta.running && (meta.status === "active" || meta.status === "needs-attention"));
+}
+
 async function cmd(type, params = {}) {
-  if (!H.currentId || H.currentMeta?.status !== "active" || !H.currentMeta?.running) {
+  if (!H.currentId || !isLiveSession(H.currentMeta)) {
     return { success: false, error: "session is not active" };
   }
   try {
@@ -587,7 +591,7 @@ function connectActiveSession(id) {
   es.onopen = () => { $("#conn").hidden = true; resyncActive(); };
   es.onmessage = (m) => { try { handleEvent(JSON.parse(m.data)); } catch (e) { console.error(e); } };
   es.onerror = () => {
-    if (H.currentId === id && H.currentMeta?.status === "active") $("#conn").hidden = false;
+    if (H.currentId === id && isLiveSession(H.currentMeta)) $("#conn").hidden = false;
   };
 }
 
@@ -775,11 +779,15 @@ function connectHubEvents() {
         H.sessions.set(ev.session.session_id, ev.session);
         paintSidebar();
         if (ev.session.session_id === H.currentId) {
-          const prevStatus = H.currentMeta?.status;
+          const wasLive = isLiveSession(H.currentMeta);
+          const nowLive = isLiveSession(ev.session);
           H.currentMeta = ev.session;
           paintTopbar(ev.session);
-          if (prevStatus === "active" && ev.session.status !== "active") {
+          if (wasLive && !nowLive) {
             selectSession(H.currentId, true);
+          } else if (nowLive) {
+            if (ev.session.status === "needs-attention") showArchiveBanner(ev.session);
+            else $("#archive-banner").hidden = true;
           }
         }
       }
