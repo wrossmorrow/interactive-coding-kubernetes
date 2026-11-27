@@ -61,3 +61,7 @@ containerize-hub tag="latest" *args="":
     docker build -f images/session-hub/Dockerfile \
         {{ args }} \
         -t "{{ image_repository }}/{{ image_name_prefix }}-session-hub:{{ tag }}" .
+
+# open a zero-ingress local kubeconfig tunnel to svc/session-hub on 127.0.0.1
+ui port="8787" context="" *args="":
+    go run ./cmd/k8s-agents ui --port "{{ port }}" {{ if context != "" { "--context " + context } else { "" } }} {{ args }}

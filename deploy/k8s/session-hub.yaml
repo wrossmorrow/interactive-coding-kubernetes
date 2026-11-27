@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: session-hub
+  namespace: session-system
+  labels:
+    app.kubernetes.io/name: session-hub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: session-hub
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: session-hub
+    spec:
+      serviceAccountName: session-hub
+      containers:
+        - name: session-hub
+          image: ghcr.io/wrossmorrow/k8s-agents-session-hub:latest
+          args:
+            - --addr=0.0.0.0:8787
+            - --hub-url=http://session-hub.session-system.svc.cluster.local:8787
+            - --spawner=k8s
+            - --model-catalog=/etc/session-hub/models.json
+            - --k8s-namespace=interactive-sessions
+            - --k8s-model-catalog-configmap=session-model-catalog
+          env:
+            - name: SESSION_GCS_BUCKET
+              value: "REPLACE_WITH_SESSIONS_BUCKET"
+            - name: K8S_GATEWAY_SECRET
+              value: "agent-gateway-token"
+            - name: K8S_GITHUB_APP_SECRET
+              value: "interactive-github-app"
+            - name: K8S_GITHUB_APP_CONFIGMAP
+              value: "interactive-github-app-config"
+          ports:
+            - name: http
+              containerPort: 8787
+          volumeMounts:
+            - name: model-catalog
+              mountPath: /etc/session-hub
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+      volumes:
+        - name: model-catalog
+          configMap:
+            name: session-model-catalog
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: session-hub
+  namespace: session-system
+  labels:
+    app.kubernetes.io/name: session-hub
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: session-hub
+  ports:
+    - name: http
+      port: 8787
+      targetPort: http
