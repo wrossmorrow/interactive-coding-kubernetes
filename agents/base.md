@@ -1,0 +1,73 @@
+# Environment
+
+You are running in a sandboxed container with no access to the host.
+
+- Docker is NOT available. You cannot run containers or `docker compose`.
+  For justfiles use `just --evaluate` and `just --dry-run <recipe>`; for YAML use `yq`.
+- Tools: git, gh, jq, yq, just, rg, fd, shellcheck, hadolint, actionlint.
+  Lint what you change: `shellcheck` for shell, `hadolint` for Dockerfiles,
+  `actionlint` for workflows.
+- Don't add new frameworks, code generators, or protocols without asking. If a task seems
+  to need a new tool, propose it in your summary first.
+- If a tool you need is missing from the image, report it rather than installing it ad hoc.
+- Don't modify AGENTS.md or any agent instruction files unless explicitly asked.
+  If you think an instruction should change, suggest it in your summary.
+- Never use pkill/killall by name. Stop only processes you started, by the PID you saved.
+- Change existing files with the edit tool (targeted replacements), not by rewriting
+  the whole file with `cat >`/heredocs. Only create new files with full writes.
+- If the same action fails or repeats twice, stop and report what you were trying to do.
+- For any task bigger than one file, first reply with a short numbered plan (files in
+  order, each with its check). Then do one step at a time, committing after each.
+  If such a plan conflicts with other rules (e.g., not making design decisions yourself)
+  you can ask the maintainer for approval on the plan. Otherwise, you can report and
+  proceed one by one yourself.
+
+# Usability/Verifiability/Correctness
+
+- Build, test, generate code and run only through a repo's `just` recipes. If a justfile
+  or recipe is missing or broken, create, add or fix the recipe rather than running ad hoc
+  commands before committing and pushing for maintainer feedback.
+- Every PR description should include "How to verify": exact `just` commands and expected
+  output.
+- Never make network calls (HTTP, S3, queues) inside a database transaction. Commit
+  state first (e.g. using status fields), make the call after, and record the outcome in a
+  separate update; suggest implementations for the call failing, the process dying in
+  between statements, or generic networking issues.
+- If code you write involves sequential database transactions, focus on what needs to be
+  implemented for safe durable record states under sequential errors; ask about status
+  fields, outbox pattern validity, or single-level automatic rollback logic.
+
+# Design choices
+
+- Don't claim design intent you weren't told. If you're unsure whether behavior is
+  intended, describe what the code does and list it under "Open questions" in your
+  summary and PR description. Never write comments asserting intent you inferred.
+- When removing a test or assertion, say why and where that behavior is covered now,
+  and move it if it's not covered anywhere.
+
+# Git workflow
+
+- Never commit to `main`. Create a branch, push it, and open a PR with `gh pr create`.
+- Start each new task on a fresh branch from an up-to-date `main`, named for that task.
+  Never reuse a branch whose PR has been merged.
+- Commit messages and PR titles use Conventional Commits: `type: subject`,
+  types: feat, fix, minor, config, infra, ci, doc, spelling, dependency.
+  Use `!` for breaking changes (e.g. `feat!: ...`).
+- Once a PR is open, add new commits for changes; don't amend or force-push.
+- To update a PR branch with changes from `main`, merge `main` into it; don't rebase.
+- If a push or command is rejected, stop and report it. Don't try workarounds.
+- Never modify `.github/workflows/` or other CI configuration. If a CI check fails
+  because of its own rules (not your code), stop and report what the check requires.
+- To read PR feedback, run `just pr-feedback <n>` every time you're asked; never rely
+  on an earlier result. It includes inline review comments that `gh pr view` omits.
+
+# Protobuf
+
+- `buf` and `protoc` are installed. If the repo has a `buf.yaml`, run `buf lint` and
+  `buf format -d` (diff only) on changed `.proto` files before committing.
+- Check API compatibility with `buf breaking --against '.git#branch=main'`; report any
+  breaking change in the PR description rather than working around it.
+- If the repo has no `buf.yaml`, don't add one and don't "fix" lint findings unless asked.
+  You can report this is missing if using protobuf to the maintainer, they can add.
+- Never rename, renumber, or remove fields in existing messages to satisfy a linter;
+  field numbers and names are the wire and JSON contract.
