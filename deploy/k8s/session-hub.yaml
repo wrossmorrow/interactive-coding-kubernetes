@@ -29,13 +29,18 @@ spec:
           env:
             - name: SESSION_GCS_BUCKET
               value: "agentrunner-515823-agentreview-sessions"
+            - name: SESSION_SINK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: session-sink-token
+                  key: token
+                  optional: true
             - name: K8S_GATEWAY_SECRET
               value: "agent-gateway-token"
-            # Uncomment once the interactive author GitHub App Secret/ConfigMap exist in interactive-sessions:
-            # - name: K8S_GITHUB_APP_SECRET
-            #   value: "interactive-github-app"
-            # - name: K8S_GITHUB_APP_CONFIGMAP
-            #   value: "interactive-github-app-config"
+            - name: K8S_GITHUB_APP_SECRET
+              value: "interactive-github-app"
+            - name: K8S_GITHUB_APP_CONFIGMAP
+              value: "interactive-github-app-config"
           ports:
             - name: http
               containerPort: 8787

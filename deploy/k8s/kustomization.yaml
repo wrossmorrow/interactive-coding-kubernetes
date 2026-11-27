@@ -4,4 +4,5 @@ resources:
   - namespaces.yaml
   - rbac.yaml
   - model-catalog.yaml
+  - github-app-config.yaml
   - session-hub.yaml
