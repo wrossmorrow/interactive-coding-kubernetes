@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.sandbox.modelCatalogConfigMap }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "k8s-agents.labels" . | nindent 4 }}
+data:
+  models.json: |
+    {{- .Values.modelCatalog | toPrettyJson | nindent 4 }}
+{{- if ne .Values.sandboxNamespace .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.sandbox.modelCatalogConfigMap }}
+  namespace: {{ .Values.sandboxNamespace }}
+  labels:
+    {{- include "k8s-agents.labels" . | nindent 4 }}
+data:
+  models.json: |
+    {{- .Values.modelCatalog | toPrettyJson | nindent 4 }}
+{{- end }}

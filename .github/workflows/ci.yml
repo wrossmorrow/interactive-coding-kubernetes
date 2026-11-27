@@ -58,9 +58,20 @@ jobs:
           paths = sorted(
               glob.glob(".github/workflows/*.yml")
               + glob.glob("deploy/k8s/*.yaml")
+              + ["charts/k8s-agents/Chart.yaml", "charts/k8s-agents/values.yaml"]
           )
           for p in paths:
               with open(p, "r", encoding="utf-8") as f:
                   list(yaml.safe_load_all(f))
               print(f"ok: {p}")
           '
+
+      - name: Lint and template Helm chart
+        run: |
+          helm lint charts/k8s-agents
+          helm template k8s-agents charts/k8s-agents --namespace session-system > /dev/null
+          helm template k8s-agents charts/k8s-agents --namespace session-system \
+            --set gcs.bucket=example-bucket \
+            --set sandbox.githubApp.enabled=true \
+            --set sandbox.githubApp.appId=12345 \
+            --set sandbox.githubApp.installationId=67890 > /dev/null

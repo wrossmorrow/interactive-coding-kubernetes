@@ -138,3 +138,34 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=sandbox-${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=sandbox-${{ matrix.name }}
+
+  chart:
+    name: Package & push Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Helm chart
+        run: helm lint charts/k8s-agents
+
+      - name: Login to GHCR Helm registry
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "${GITHUB_TOKEN}" | helm registry login "${REGISTRY}" -u "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Package and push OCI chart
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          SHA: ${{ github.sha }}
+        run: |
+          if [ "${REF_TYPE}" = "tag" ]; then
+            ver="${REF_NAME#v}"
+            app_ver="${ver}"
+          else
+            ver="0.0.0-${SHA:0:7}"
+            app_ver="latest"
+          fi
+          helm package charts/k8s-agents --version "${ver}" --app-version "${app_ver}" -d /tmp/charts
+          helm push "/tmp/charts/k8s-agents-${ver}.tgz" "oci://${REGISTRY}/${IMAGE_OWNER}/charts"

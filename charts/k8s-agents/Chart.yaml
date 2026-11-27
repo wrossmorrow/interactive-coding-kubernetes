@@ -1,0 +1,10 @@
+apiVersion: v2
+name: k8s-agents
+description: Model-agnostic Kubernetes interactive coding-session workbench for pi (session-hub + sandbox RBAC/configs)
+type: application
+version: 0.1.0
+appVersion: "latest"
+sources:
+  - https://github.com/wrossmorrow/k8s-agents
+annotations:
+  licenses: Apache-2.0

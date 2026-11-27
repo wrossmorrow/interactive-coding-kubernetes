@@ -1,0 +1,108 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/wrossmorrow/k8s-agents-session-hub
+  tag: ""
+  pullPolicy: Always
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Namespace where interactive sandbox pods are spawned.
+sandboxNamespace: interactive-sessions
+createSandboxNamespace: false
+
+serviceAccount:
+  create: true
+  name: session-hub
+  annotations: {}
+    # GKE Workload Identity annotation pointing to the GCS-only GCP Service Account:
+    # iam.gke.io/gcp-service-account: "cluster-session-hub@project-id.iam.gserviceaccount.com"
+
+rbac:
+  create: true
+
+service:
+  type: ClusterIP
+  port: 8787
+
+# GCS session archive bucket (accessed by session-hub via Workload Identity).
+gcs:
+  bucket: ""
+
+# Optional shared bearer secret for ARC v2 agentrunner POST /internal/archive.
+sessionSink:
+  secretName: session-sink-token
+  secretKey: token
+  optional: true
+
+# Sandbox Pod configuration passed to session-hub's K8sPodSpawner.
+sandbox:
+  imageRepository: ghcr.io/wrossmorrow
+  imageTag: latest
+  gatewayEndpoint: http://agent-router.ai-gateway.svc.cluster.local:8080/v1
+  gatewaySecretName: agent-gateway-token
+  idlePauseSeconds: 1200
+  modelCatalogConfigMap: session-model-catalog
+  githubApp:
+    enabled: false
+    secretName: interactive-github-app
+    configMapName: interactive-github-app-config
+    createConfigMap: true
+    appId: ""
+    installationId: ""
+
+# Model catalog rendered as models.json into both the release namespace and sandboxNamespace.
+modelCatalog:
+  gatewayEndpoint: http://agent-router.ai-gateway.svc.cluster.local:8080/v1
+  defaultProvider: gateway
+  defaultModel: Qwen/Qwen3.8-27B
+  models:
+    - provider: gateway
+      id: Qwen/Qwen3.8-27B
+      name: Qwen 3.8 27B
+      reasoning: true
+      input:
+        - text
+      contextWindow: 131072
+      maxTokens: 32768
+    - provider: gateway
+      id: RecursiveSI/flint
+      name: Flint
+      reasoning: false
+      input:
+        - text
+      contextWindow: 262144
+      maxTokens: 32768
+    - provider: gateway
+      id: thinkingmachines/Inkling-2-Mini
+      name: Inkling 2 Mini
+      reasoning: true
+      input:
+        - text
+        - image
+      contextWindow: 131072
+      maxTokens: 32768
+    - provider: gateway
+      id: gemini-3.8-flash
+      name: Gemini 3.8 Flash
+      reasoning: true
+      input:
+        - text
+        - image
+      contextWindow: 1000000
+      maxTokens: 65536
+
+allowedHosts: ""
+
+podAnnotations: {}
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

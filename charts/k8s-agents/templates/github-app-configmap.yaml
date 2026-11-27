@@ -1,0 +1,12 @@
+{{- if and .Values.sandbox.githubApp.enabled .Values.sandbox.githubApp.createConfigMap }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.sandbox.githubApp.configMapName }}
+  namespace: {{ .Values.sandboxNamespace }}
+  labels:
+    {{- include "k8s-agents.labels" . | nindent 4 }}
+data:
+  github_app_id: {{ .Values.sandbox.githubApp.appId | quote }}
+  github_app_installation_id: {{ .Values.sandbox.githubApp.installationId | quote }}
+{{- end }}

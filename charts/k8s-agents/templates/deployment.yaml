@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "k8s-agents.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "k8s-agents.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "k8s-agents.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "k8s-agents.labels" . | nindent 8 }}
+      annotations:
+        checksum/model-catalog: {{ include (print $.Template.BasePath "/model-catalog-configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "k8s-agents.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: session-hub
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --addr=0.0.0.0:{{ .Values.service.port }}
+            - --hub-url=http://{{ include "k8s-agents.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+            - --spawner=k8s
+            - --model-catalog=/etc/session-hub/models.json
+            - --k8s-namespace={{ .Values.sandboxNamespace }}
+            - --k8s-image-repo={{ .Values.sandbox.imageRepository }}
+            - --k8s-image-tag={{ .Values.sandbox.imageTag }}
+            - --k8s-gateway-url={{ .Values.sandbox.gatewayEndpoint }}
+            - --k8s-model-catalog-configmap={{ .Values.sandbox.modelCatalogConfigMap }}
+            - --k8s-idle-pause-seconds={{ .Values.sandbox.idlePauseSeconds }}
+          env:
+            {{- if .Values.gcs.bucket }}
+            - name: SESSION_GCS_BUCKET
+              value: {{ .Values.gcs.bucket | quote }}
+            {{- end }}
+            {{- if .Values.sessionSink.secretName }}
+            - name: SESSION_SINK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sessionSink.secretName }}
+                  key: {{ .Values.sessionSink.secretKey | default "token" }}
+                  optional: {{ .Values.sessionSink.optional }}
+            {{- end }}
+            {{- if .Values.sandbox.gatewaySecretName }}
+            - name: K8S_GATEWAY_SECRET
+              value: {{ .Values.sandbox.gatewaySecretName | quote }}
+            {{- end }}
+            {{- if .Values.sandbox.githubApp.enabled }}
+            - name: K8S_GITHUB_APP_SECRET
+              value: {{ .Values.sandbox.githubApp.secretName | quote }}
+            - name: K8S_GITHUB_APP_CONFIGMAP
+              value: {{ .Values.sandbox.githubApp.configMapName | quote }}
+            {{- end }}
+            {{- if .Values.allowedHosts }}
+            - name: SESSION_HUB_ALLOWED_HOSTS
+              value: {{ .Values.allowedHosts | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          volumeMounts:
+            - name: model-catalog
+              mountPath: /etc/session-hub
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: model-catalog
+          configMap:
+            name: {{ .Values.sandbox.modelCatalogConfigMap }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
