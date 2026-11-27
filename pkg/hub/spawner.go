@@ -92,11 +92,15 @@ func (l *LocalSpawner) Spawn(ctx context.Context, spec SpawnSpec) (string, error
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	endpoint := "http://" + addr
 
-	workDir := filepath.Join(l.cfg.WorkRoot, spec.SessionID)
+	workRoot, err := filepath.Abs(l.cfg.WorkRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve work root: %w", err)
+	}
+	workDir := filepath.Join(workRoot, spec.SessionID)
 	if err := ensureScratchGitRepo(ctx, workDir); err != nil {
 		return "", fmt.Errorf("prepare workdir: %w", err)
 	}
-	agentDir := filepath.Join(l.cfg.WorkRoot, ".agent-"+spec.SessionID)
+	agentDir := filepath.Join(workRoot, ".agent-"+spec.SessionID)
 
 	env := append([]string(nil), os.Environ()...)
 	env = append(env,
