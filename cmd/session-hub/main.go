@@ -40,6 +40,11 @@ func main() {
 		archiveSinkToken = flag.String("archive-sink-token", os.Getenv("SESSION_SINK_TOKEN"), "bearer token accepted on POST /internal/archive for agentrunner CI archives")
 		allowedHosts     = flag.String("allowed-hosts", os.Getenv("SESSION_HUB_ALLOWED_HOSTS"), "comma-separated extra allowed Host headers")
 		flushIntervalSec = flag.Int("flush-interval", 30, "periodic flush interval (seconds) for spawned daemons")
+		wakeupInterval   = flag.Int("wakeup-interval", 60, "GitHub PR wake-up poll interval in seconds (0 disables polling)")
+		githubToken      = flag.String("github-token", os.Getenv("GITHUB_TOKEN"), "optional static GitHub token for PR wake-up polling")
+		githubAppID      = flag.String("github-app-id", os.Getenv("GITHUB_APP_ID"), "GitHub App ID for PR wake-up polling (preferred over static token)")
+		githubInstallID  = flag.String("github-app-installation-id", os.Getenv("GITHUB_APP_INSTALLATION_ID"), "GitHub App installation ID for PR wake-up polling")
+		githubKeyPath    = flag.String("github-app-private-key-path", os.Getenv("GITHUB_APP_PRIVATE_KEY_PATH"), "path to GitHub App private key PEM for PR wake-up polling")
 
 		// Kubernetes PodSpawner options (--spawner=k8s).
 		k8sNamespace      = flag.String("k8s-namespace", envOr("K8S_SANDBOX_NAMESPACE", k8s.DefaultNamespace), "namespace for sandbox Pods")
@@ -145,6 +150,35 @@ func main() {
 		TokenLookup:      tokenLookup,
 		AllowedHosts:     strings.Split(*allowedHosts, ","),
 	})
+
+	if *wakeupInterval > 0 {
+		var fetcher *hub.GitHubReviewFetcher
+		appID := strings.TrimSpace(*githubAppID)
+		installID := strings.TrimSpace(*githubInstallID)
+		keyPath := strings.TrimSpace(*githubKeyPath)
+		staticTok := strings.TrimSpace(*githubToken)
+		switch {
+		case appID != "" && installID != "" && keyPath != "":
+			tp, err := hub.NewGitHubAppTokenProviderFromFile(appID, installID, keyPath, "")
+			if err != nil {
+				log.Fatalf("init github app token provider: %v", err)
+			}
+			fetcher = &hub.GitHubReviewFetcher{TokenProvider: tp}
+			log.Printf("PR review wake-up watcher enabled via GitHub App %s (interval=%ds)", appID, *wakeupInterval)
+		case appID != "" || installID != "" || keyPath != "":
+			log.Printf("WARNING: PR review wake-up watcher disabled due to incomplete GitHub App config (appID=%v, installationID=%v, keyPath=%v)", appID != "", installID != "", keyPath != "")
+		case staticTok != "":
+			fetcher = &hub.GitHubReviewFetcher{Token: staticTok}
+			log.Printf("PR review wake-up watcher enabled via static token (interval=%ds)", *wakeupInterval)
+		default:
+			log.Printf("PR review wake-up watcher disabled (no GitHub App or GITHUB_TOKEN configured)")
+		}
+		if fetcher != nil {
+			watcher := hub.NewWakeWatcher(srv, fetcher, time.Duration(*wakeupInterval)*time.Second)
+			stopWatcher := watcher.Start(context.Background())
+			defer stopWatcher()
+		}
+	}
 
 	httpSrv := &http.Server{
 		Addr:    *addr,

@@ -37,6 +37,16 @@ sessionSink:
   secretKey: token
   optional: true
 
+# Optional outbound conditional-ETag GitHub PR review wake-up poller.
+# Preferred: sync the interactive GitHub App PEM into the release namespace as
+# `githubAppSecretName` (reuses sandbox.githubApp.appId & installationId).
+wakeup:
+  intervalSeconds: 0
+  githubAppSecretName: ""
+  githubAppKeyFile: private-key.pem
+  githubTokenSecretName: ""
+  githubTokenSecretKey: token
+
 # Sandbox Pod configuration passed to session-hub's K8sPodSpawner.
 sandbox:
   imageRepository: ghcr.io/wrossmorrow

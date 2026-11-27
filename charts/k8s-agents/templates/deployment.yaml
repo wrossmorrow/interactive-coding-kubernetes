@@ -40,10 +40,25 @@ spec:
             - --k8s-gateway-url={{ .Values.sandbox.gatewayEndpoint }}
             - --k8s-model-catalog-configmap={{ .Values.sandbox.modelCatalogConfigMap }}
             - --k8s-idle-pause-seconds={{ .Values.sandbox.idlePauseSeconds }}
+            - --wakeup-interval={{ .Values.wakeup.intervalSeconds | default 0 }}
           env:
             {{- if .Values.gcs.bucket }}
             - name: SESSION_GCS_BUCKET
               value: {{ .Values.gcs.bucket | quote }}
+            {{- end }}
+            {{- if .Values.wakeup.githubAppSecretName }}
+            - name: GITHUB_APP_ID
+              value: {{ required "sandbox.githubApp.appId is required when wakeup.githubAppSecretName is set" .Values.sandbox.githubApp.appId | quote }}
+            - name: GITHUB_APP_INSTALLATION_ID
+              value: {{ required "sandbox.githubApp.installationId is required when wakeup.githubAppSecretName is set" .Values.sandbox.githubApp.installationId | quote }}
+            - name: GITHUB_APP_PRIVATE_KEY_PATH
+              value: "/run/secrets/gh-app/{{ .Values.wakeup.githubAppKeyFile | default "private-key.pem" }}"
+            {{- else if .Values.wakeup.githubTokenSecretName }}
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.wakeup.githubTokenSecretName }}
+                  key: {{ .Values.wakeup.githubTokenSecretKey | default "token" }}
             {{- end }}
             {{- if .Values.sessionSink.secretName }}
             - name: SESSION_SINK_TOKEN
@@ -75,6 +90,11 @@ spec:
             - name: model-catalog
               mountPath: /etc/session-hub
               readOnly: true
+            {{- if .Values.wakeup.githubAppSecretName }}
+            - name: gh-app-key
+              mountPath: /run/secrets/gh-app
+              readOnly: true
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /api/health
@@ -95,6 +115,14 @@ spec:
         - name: model-catalog
           configMap:
             name: {{ .Values.sandbox.modelCatalogConfigMap }}
+        {{- if .Values.wakeup.githubAppSecretName }}
+        - name: gh-app-key
+          secret:
+            secretName: {{ .Values.wakeup.githubAppSecretName }}
+            items:
+              - key: {{ .Values.wakeup.githubAppKeyFile | default "private-key.pem" }}
+                path: {{ .Values.wakeup.githubAppKeyFile | default "private-key.pem" }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

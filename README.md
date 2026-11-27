@@ -20,3 +20,12 @@ just check
 just dev
 # Open http://127.0.0.1:8787
 ```
+
+## PR Review Wake-Up Loop
+
+Interactive sessions can optionally wake on new GitHub PR reviews (including `agentrunner` ARC v2 reviews) via conditional `If-None-Match` ETag polling (zero inbound webhooks):
+
+- **Enable in Helm (`charts/k8s-agents/values.yaml`):** Set `wakeup.intervalSeconds` (e.g. `60`) and `wakeup.githubAppSecretName` (reusing `sandbox.githubApp.appId` & `installationId`), or `wakeup.githubTokenSecretName` for a static token.
+- **In `session-ui`:** Click **Link PR** on an interactive session and choose a `wake_policy` (`evaluate-and-stage` default, `auto-push`, or `off`).
+- **Guardrails:** `evaluate-and-stage` marks sessions `needs-attention` for human sign-off and links directly to the archived CI review transcript; `max_wakeups_per_human_turn` (default `1`) prevents author-vs-reviewer ping-pong loops until the next human prompt.
+
