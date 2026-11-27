@@ -192,6 +192,24 @@ func (p *PodSpawner) Stop(ctx context.Context, sessionID string) error {
 // terminate developers' active interactive sandbox Pods.
 func (p *PodSpawner) CloseAll() error { return nil }
 
+// LookupToken recovers the per-session bearer token from its Kubernetes Secret
+// so session-hub restarts seamlessly re-authenticate to already-running Pods.
+func (p *PodSpawner) LookupToken(sessionID string) (string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sec, err := p.client.CoreV1().Secrets(p.cfg.Namespace).Get(ctx, TokenSecretName(sessionID), metav1.GetOptions{})
+	if err != nil {
+		return "", false
+	}
+	if tok := string(sec.Data["token"]); tok != "" {
+		return tok, true
+	}
+	if tok := sec.StringData["token"]; tok != "" {
+		return tok, true
+	}
+	return "", false
+}
+
 func (p *PodSpawner) setEndpoint(sessionID, ep string) {
 	p.mu.Lock()
 	p.endpoints[sessionID] = ep

@@ -82,8 +82,9 @@ func main() {
 	}
 
 	var (
-		srv     *hub.Server
-		spawner hub.Spawner
+		srv         *hub.Server
+		spawner     hub.Spawner
+		tokenLookup func(string) (string, bool)
 	)
 	onExit := func(id string) {
 		if srv != nil {
@@ -107,7 +108,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("init kubernetes client: %v", err)
 		}
-		spawner = k8s.NewPodSpawner(clientset, k8s.PodConfig{
+		k8sSpawner := k8s.NewPodSpawner(clientset, k8s.PodConfig{
 			Namespace:              *k8sNamespace,
 			ImageRepository:        *k8sImageRepo,
 			ImageTag:               *k8sImageTag,
@@ -119,6 +120,8 @@ func main() {
 			IdlePauseSeconds:       *k8sIdlePauseSec,
 			FlushIntervalSeconds:   *flushIntervalSec,
 		}, onExit)
+		spawner = k8sSpawner
+		tokenLookup = k8sSpawner.LookupToken
 	default:
 		log.Fatalf("unsupported --spawner=%q (want local or k8s)", *spawnerMode)
 	}
@@ -139,6 +142,7 @@ func main() {
 		UIFS:             ui.FS(),
 		HubBaseURL:       hubBaseURL,
 		ArchiveSinkToken: *archiveSinkToken,
+		TokenLookup:      tokenLookup,
 		AllowedHosts:     strings.Split(*allowedHosts, ","),
 	})
 

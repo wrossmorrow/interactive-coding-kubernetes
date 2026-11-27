@@ -30,6 +30,7 @@ type Config struct {
 	UIFS             fs.FS
 	HubBaseURL       string // Internal URL passed to spawned pi-sessiond instances
 	ArchiveSinkToken string // Shared bearer token for agentrunner POST /internal/archive
+	TokenLookup      func(sessionID string) (string, bool)
 	AllowedHosts     []string
 }
 
@@ -59,6 +60,10 @@ func NewServer(cfg Config) *Server {
 	if len(cfg.Catalog.Models) == 0 {
 		cfg.Catalog = piconfig.DefaultCatalog()
 	}
+	tm := NewTokenManager()
+	if cfg.TokenLookup != nil {
+		tm.SetLookup(cfg.TokenLookup)
+	}
 	return &Server{
 		store:            cfg.Store,
 		spawner:          cfg.Spawner,
@@ -67,7 +72,7 @@ func NewServer(cfg Config) *Server {
 		hubBaseURL:       strings.TrimRight(cfg.HubBaseURL, "/"),
 		archiveSinkToken: strings.TrimSpace(cfg.ArchiveSinkToken),
 		allowedHosts:     hosts,
-		tokens:           NewTokenManager(),
+		tokens:           tm,
 		subs:             map[chan []byte]struct{}{},
 	}
 }

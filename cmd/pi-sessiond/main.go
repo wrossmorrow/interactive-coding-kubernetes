@@ -85,6 +85,17 @@ func main() {
 
 	uploader := sessions.NewUploader(store, flushInterval, sessions.DefaultMaxPartBytes, nil)
 
+	// Clone the target GitHub repo (if configured and not yet present) before
+	// rehydrating workspace.bundle so unpushed commits and dirty edits apply
+	// cleanly on top of the cloned repository.
+	if repo := strings.TrimSpace(os.Getenv("GITHUB_REPO")); repo != "" {
+		cloneCtx, cloneCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		if err := workspace.EnsureCloned(cloneCtx, workDir, repo, os.Getenv("GITHUB_BRANCH")); err != nil {
+			log.Printf("clone repo %s warning: %v", repo, err)
+		}
+		cloneCancel()
+	}
+
 	// Rehydrate existing transcript + workspace.bundle + upload offset if this
 	// session is being rejoined or forked.
 	if store != nil {

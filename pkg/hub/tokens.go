@@ -12,10 +12,20 @@ import (
 type TokenManager struct {
 	mu     sync.RWMutex
 	tokens map[string]string // sessionID -> token
+	lookup func(sessionID string) (string, bool)
 }
 
 func NewTokenManager() *TokenManager {
 	return &TokenManager{tokens: map[string]string{}}
+}
+
+// SetLookup configures an optional durable fallback (e.g. reading a per-session
+// Kubernetes Secret) so session-hub restarts seamlessly recover tokens for
+// already-running sandbox pods.
+func (m *TokenManager) SetLookup(fn func(sessionID string) (string, bool)) {
+	m.mu.Lock()
+	m.lookup = fn
+	m.mu.Unlock()
 }
 
 // Issue returns a freshly generated bearer token bound exclusively to sessionID.
@@ -29,12 +39,25 @@ func (m *TokenManager) Issue(sessionID string) string {
 	return tok
 }
 
-// Get returns the current token for sessionID, if any.
+// Get returns the current token for sessionID, falling back to the durable
+// lookup (if configured) on cache miss.
 func (m *TokenManager) Get(sessionID string) (string, bool) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	tok, ok := m.tokens[sessionID]
-	return tok, ok
+	lookup := m.lookup
+	m.mu.RUnlock()
+	if ok && tok != "" {
+		return tok, true
+	}
+	if lookup != nil {
+		if recovered, found := lookup(sessionID); found && recovered != "" {
+			m.mu.Lock()
+			m.tokens[sessionID] = recovered
+			m.mu.Unlock()
+			return recovered, true
+		}
+	}
+	return "", false
 }
 
 // Verify checks whether token is valid for sessionID.
@@ -42,9 +65,7 @@ func (m *TokenManager) Verify(sessionID, token string) bool {
 	if token == "" {
 		return false
 	}
-	m.mu.RLock()
-	want, ok := m.tokens[sessionID]
-	m.mu.RUnlock()
+	want, ok := m.Get(sessionID)
 	if !ok || want == "" {
 		return false
 	}

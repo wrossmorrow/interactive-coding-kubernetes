@@ -388,6 +388,7 @@ func BuildSandboxPod(cfg PodConfig, spec hub.SpawnSpec) *corev1.Pod {
 		{Name: "SESSION_KIND", Value: string(kind)},
 		{Name: "TOOLCHAIN", Value: tc},
 		{Name: "GITHUB_REPO", Value: spec.Repo},
+		{Name: "GITHUB_BRANCH", Value: spec.Branch},
 		{Name: "SESSION_HUB_URL", Value: spec.HubURL},
 		{
 			Name: "SESSION_HUB_TOKEN",

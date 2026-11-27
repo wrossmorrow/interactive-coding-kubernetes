@@ -126,10 +126,13 @@ func TestPodSpawnerLifecycleAndRediscovery(t *testing.T) {
 		t.Fatalf("token secret missing: %v", err)
 	}
 
-	// Simulate session-hub restart with a fresh PodSpawner instance -> rediscovers running PodIP.
+	// Simulate session-hub restart with a fresh PodSpawner instance -> rediscovers running PodIP and Secret token.
 	spawner2 := NewPodSpawner(cs, cfg, nil)
 	if got, ok := spawner2.Endpoint(spec.SessionID); !ok || got != "http://10.42.0.15:8787" {
 		t.Fatalf("rediscovered endpoint = (%q, %v), want (http://10.42.0.15:8787, true)", got, ok)
+	}
+	if tok, ok := spawner2.LookupToken(spec.SessionID); !ok || tok != "tok-123" {
+		t.Fatalf("rediscovered token = (%q, %v), want (tok-123, true)", tok, ok)
 	}
 
 	// Stop deletes the Pod via the restarted spawner instance.
