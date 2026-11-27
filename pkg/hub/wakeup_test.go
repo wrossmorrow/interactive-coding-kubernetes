@@ -1,0 +1,196 @@
+package hub_test
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/wrossmorrow/k8s-agents/pkg/hub"
+	"github.com/wrossmorrow/k8s-agents/pkg/sessions"
+)
+
+type fakeReviewFetcher struct {
+	mu      sync.Mutex
+	calls   int
+	etags   []string
+	reviews []hub.PullReview
+	etag    string
+}
+
+func (f *fakeReviewFetcher) ListReviews(_ context.Context, _ string, _ int, etag string) ([]hub.PullReview, string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.etags = append(f.etags, etag)
+	if etag != "" && etag == f.etag {
+		return nil, f.etag, true, nil
+	}
+	return f.reviews, f.etag, false, nil
+}
+
+type fakeSpawner struct {
+	mu       sync.Mutex
+	endpoint string
+	running  map[string]bool
+	spawns   int
+}
+
+func (f *fakeSpawner) Spawn(_ context.Context, spec hub.SpawnSpec) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.spawns++
+	f.running[spec.SessionID] = true
+	return f.endpoint, nil
+}
+
+func (f *fakeSpawner) Endpoint(id string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.running[id] {
+		return f.endpoint, true
+	}
+	return "", false
+}
+
+func (f *fakeSpawner) Running(id string) bool {
+	_, ok := f.Endpoint(id)
+	return ok
+}
+
+func (f *fakeSpawner) WaitExit(_ context.Context, _ string) {}
+func (f *fakeSpawner) Stop(_ context.Context, id string) error {
+	f.mu.Lock()
+	delete(f.running, id)
+	f.mu.Unlock()
+	return nil
+}
+func (f *fakeSpawner) CloseAll() error { return nil }
+
+func TestParseAgentrunnerFooterAndReviewFiltering(t *testing.T) {
+	body := "Please fix the race condition.\n\n<!-- agentrunner-session: 019dbbc7-aaaa-bbbb-cccc-111122223333 -->"
+	if got := hub.ParseAgentrunnerSessionID(body); got != "019dbbc7-aaaa-bbbb-cccc-111122223333" {
+		t.Fatalf("ParseAgentrunnerSessionID = %q", got)
+	}
+
+	// Clean APPROVE with only the footer must NOT wake.
+	cleanApprove := hub.PullReview{ID: 10, State: "APPROVED", Body: "<!-- agentrunner-session: abc -->", CommitID: "sha1"}
+	if hub.ShouldWakeForReview(cleanApprove, "sha1", 0) {
+		t.Fatal("clean APPROVE should not trigger wake-up")
+	}
+
+	// REQUEST_CHANGES on matching SHA must wake.
+	reqChanges := hub.PullReview{ID: 11, State: "CHANGES_REQUESTED", Body: body, CommitID: "sha1"}
+	if !hub.ShouldWakeForReview(reqChanges, "sha1", 10) {
+		t.Fatal("CHANGES_REQUESTED should trigger wake-up")
+	}
+	// Duplicate ID must not wake again.
+	if hub.ShouldWakeForReview(reqChanges, "sha1", 11) {
+		t.Fatal("already-processed review ID must not wake again")
+	}
+}
+
+func TestWakeWatcherETagRejoinAndAntiPingPongCap(t *testing.T) {
+	store, err := sessions.NewDirStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Mock daemon recording injected wake-up prompts.
+	var injected []string
+	var injMu sync.Mutex
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var cmd map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&cmd)
+		if msg, ok := cmd["message"].(string); ok {
+			injMu.Lock()
+			injected = append(injected, msg)
+			injMu.Unlock()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer daemon.Close()
+
+	spawner := &fakeSpawner{endpoint: daemon.URL, running: map[string]bool{}}
+	srv := hub.NewServer(hub.Config{
+		Store:   store,
+		Spawner: spawner,
+	})
+
+	// Seed a paused interactive session linked to PR #42.
+	meta := sessions.Metadata{
+		SessionID:              "sess-wake-1",
+		SessionName:            "fix-bug",
+		SessionKind:            sessions.KindInteractive,
+		Status:                 sessions.StatusPaused,
+		Repo:                   "wrossmorrow/k8s-agents",
+		PRNumber:               42,
+		HeadSHA:                "abc123",
+		WakePolicy:             sessions.WakePolicyEvaluateAndStage,
+		MaxWakeupsPerHumanTurn: 1,
+	}
+	mb, _ := json.Marshal(meta)
+	if err := store.Put(context.Background(), sessions.MetadataKey(meta.SessionID), mb, sessions.JSONContentType); err != nil {
+		t.Fatal(err)
+	}
+
+	fetcher := &fakeReviewFetcher{
+		etag: `"etag-1"`,
+		reviews: []hub.PullReview{
+			{
+				ID:       101,
+				State:    "CHANGES_REQUESTED",
+				Body:     "Check error handling.\n<!-- agentrunner-session: ar-rev-99 -->",
+				CommitID: "abc123",
+			},
+		},
+	}
+	watcher := hub.NewWakeWatcher(srv, fetcher, 0)
+
+	// Poll 1: wakes paused session, injects evaluate-and-stage prompt, sets needs-attention + review link.
+	watcher.PollOnce(context.Background())
+
+	if spawner.spawns != 1 {
+		t.Fatalf("spawns = %d, want 1", spawner.spawns)
+	}
+	injMu.Lock()
+	gotCount := len(injected)
+	gotPrompt := ""
+	if gotCount > 0 {
+		gotPrompt = injected[0]
+	}
+	injMu.Unlock()
+	if gotCount != 1 || !strings.Contains(gotPrompt, "evaluate-and-stage") {
+		t.Fatalf("unexpected injected prompts: %v", injected)
+	}
+
+	rawMeta, err := store.Get(context.Background(), sessions.MetadataKey(meta.SessionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated sessions.Metadata
+	_ = json.Unmarshal(rawMeta, &updated)
+	if updated.Status != sessions.StatusNeedsAttention || updated.WakeupsSinceHumanTurn != 1 || updated.LastReviewSessionID != "ar-rev-99" {
+		t.Fatalf("unexpected updated metadata: %+v", updated)
+	}
+
+	// Poll 2 with another review ID: blocked by maxWakeupsPerHumanTurn (1/1) anti-ping-pong cap.
+	fetcher.etag = `"etag-2"`
+	fetcher.reviews = append(fetcher.reviews, hub.PullReview{
+		ID:       102,
+		State:    "CHANGES_REQUESTED",
+		Body:     "Second review",
+		CommitID: "abc123",
+	})
+	watcher.PollOnce(context.Background())
+
+	injMu.Lock()
+	if len(injected) != 1 {
+		t.Fatalf("anti-ping-pong cap failed: injected %d prompts, want 1", len(injected))
+	}
+	injMu.Unlock()
+}

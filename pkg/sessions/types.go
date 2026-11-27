@@ -13,6 +13,19 @@ import (
 	"github.com/google/uuid"
 )
 
+// WakePolicy controls how an interactive session responds when a new GitHub PR
+// review lands on its linked pull request.
+type WakePolicy string
+
+const (
+	WakePolicyEvaluateAndStage WakePolicy = "evaluate-and-stage"
+	WakePolicyAutoPush         WakePolicy = "auto-push"
+	WakePolicyOff              WakePolicy = "off"
+)
+
+// DefaultMaxWakeupsPerHumanTurn bounds automated author-vs-reviewer loops.
+const DefaultMaxWakeupsPerHumanTurn = 1
+
 // Status represents the lifecycle state of a session.
 type Status string
 
@@ -62,40 +75,46 @@ const (
 
 // Metadata is persisted at sessions/<id>/metadata.json and indexed by session-hub.
 type Metadata struct {
-	SessionID        string         `json:"session_id"`
-	SessionName      string         `json:"session_name,omitempty"`
-	SessionKind      Kind           `json:"session_kind,omitempty"`
-	Status           Status         `json:"status"`
-	Repo             string         `json:"repo,omitempty"`
-	Branch           string         `json:"branch,omitempty"`
-	BaseRef          string         `json:"base_ref,omitempty"`
-	HeadSHA          string         `json:"head_sha,omitempty"`
-	PRNumber         int            `json:"pr_number,omitempty"`
-	IssueNumber      int            `json:"issue_number,omitempty"`
-	RunID            string         `json:"run_id,omitempty"`
-	Tag              string         `json:"tag,omitempty"`
-	Mode             string         `json:"mode,omitempty"`
-	Output           string         `json:"output,omitempty"`
-	Verdict          string         `json:"verdict,omitempty"`
-	Findings         int            `json:"findings,omitempty"`
-	Turns            int            `json:"turns,omitempty"`
-	Toolchain        string         `json:"toolchain,omitempty"`
-	ForkedFrom       string         `json:"forked_from,omitempty"`
-	WakeSummary      string         `json:"wake_summary,omitempty"`
-	LastOffset       int64          `json:"last_offset,omitempty"`
-	PartCount        int64          `json:"part_count,omitempty"`
-	Hash             string         `json:"hash,omitempty"`
-	AgentEnvironment map[string]any `json:"agent_environment,omitempty"`
-	ModelConfig      map[string]any `json:"model_config,omitempty"`
-	AgentIdentity    string         `json:"agent_identity,omitempty"`
-	ClientHost       string         `json:"client_host,omitempty"`
-	StartedAt        string         `json:"started_at,omitempty"`
-	UpdatedAt        string         `json:"updated_at,omitempty"`
-	EndedAt          string         `json:"ended_at,omitempty"`
-	EndReason        string         `json:"end_reason,omitempty"`
-	Tokens           map[string]any `json:"tokens,omitempty"`
-	ToolCalls        int64          `json:"tool_calls,omitempty"`
-	MessageCounts    map[string]any `json:"message_counts,omitempty"`
+	SessionID              string         `json:"session_id"`
+	SessionName            string         `json:"session_name,omitempty"`
+	SessionKind            Kind           `json:"session_kind,omitempty"`
+	Status                 Status         `json:"status"`
+	Repo                   string         `json:"repo,omitempty"`
+	Branch                 string         `json:"branch,omitempty"`
+	BaseRef                string         `json:"base_ref,omitempty"`
+	HeadSHA                string         `json:"head_sha,omitempty"`
+	PRNumber               int            `json:"pr_number,omitempty"`
+	IssueNumber            int            `json:"issue_number,omitempty"`
+	RunID                  string         `json:"run_id,omitempty"`
+	Tag                    string         `json:"tag,omitempty"`
+	Mode                   string         `json:"mode,omitempty"`
+	Output                 string         `json:"output,omitempty"`
+	Verdict                string         `json:"verdict,omitempty"`
+	Findings               int            `json:"findings,omitempty"`
+	Turns                  int            `json:"turns,omitempty"`
+	Toolchain              string         `json:"toolchain,omitempty"`
+	ForkedFrom             string         `json:"forked_from,omitempty"`
+	WakePolicy             WakePolicy     `json:"wake_policy,omitempty"`
+	MaxWakeupsPerHumanTurn int            `json:"max_wakeups_per_human_turn,omitempty"`
+	WakeupsSinceHumanTurn  int            `json:"wakeups_since_human_turn,omitempty"`
+	LastProcessedReviewID  int64          `json:"last_processed_review_id,omitempty"`
+	LastReviewSessionID    string         `json:"last_review_session_id,omitempty"`
+	LastWakeAt             string         `json:"last_wake_at,omitempty"`
+	WakeSummary            string         `json:"wake_summary,omitempty"`
+	LastOffset             int64          `json:"last_offset,omitempty"`
+	PartCount              int64          `json:"part_count,omitempty"`
+	Hash                   string         `json:"hash,omitempty"`
+	AgentEnvironment       map[string]any `json:"agent_environment,omitempty"`
+	ModelConfig            map[string]any `json:"model_config,omitempty"`
+	AgentIdentity          string         `json:"agent_identity,omitempty"`
+	ClientHost             string         `json:"client_host,omitempty"`
+	StartedAt              string         `json:"started_at,omitempty"`
+	UpdatedAt              string         `json:"updated_at,omitempty"`
+	EndedAt                string         `json:"ended_at,omitempty"`
+	EndReason              string         `json:"end_reason,omitempty"`
+	Tokens                 map[string]any `json:"tokens,omitempty"`
+	ToolCalls              int64          `json:"tool_calls,omitempty"`
+	MessageCounts          map[string]any `json:"message_counts,omitempty"`
 	// Running is a transient runtime flag populated by session-hub responses.
 	Running bool `json:"running,omitempty"`
 }

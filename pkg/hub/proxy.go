@@ -1,6 +1,9 @@
 package hub
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -23,6 +26,23 @@ func (s *Server) handleSessionProxy(w http.ResponseWriter, r *http.Request) {
 			"status":  status,
 		})
 		return
+	}
+
+	// Reset the anti-ping-pong wake-up counter whenever a human sends a turn
+	// through the browser proxy (/s/{id}/api/cmd).
+	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/api/cmd") && r.Body != nil {
+		if body, err := io.ReadAll(io.LimitReader(r.Body, 32<<20)); err == nil {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			var peek struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(body, &peek) == nil {
+				switch peek.Type {
+				case "prompt", "steer", "follow_up":
+					go s.resetHumanTurn(id)
+				}
+			}
+		}
 	}
 
 	target, err := url.Parse(endpoint)

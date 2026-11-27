@@ -463,8 +463,9 @@ async function selectSession(id, force = false) {
   paintSidebar();
   paintTopbar(meta);
 
-  if (meta.status === "active" && meta.running) {
-    $("#archive-banner").hidden = true;
+  if (meta.running && (meta.status === "active" || meta.status === "needs-attention")) {
+    if (meta.status === "needs-attention") showArchiveBanner(meta);
+    else $("#archive-banner").hidden = true;
     $("#editor").hidden = false;
     connectActiveSession(id);
   } else {
@@ -485,7 +486,28 @@ function paintTopbar(meta) {
 
   const acts = $("#tb-actions");
   acts.textContent = "";
-  if (meta.status === "active" && meta.running) {
+  const isInteractive = !meta.session_kind || meta.session_kind === "interactive";
+  if (isInteractive && meta.status !== "closed") {
+    const prBtn = el("button", "btn", meta.pr_number ? `PR #${meta.pr_number}` : "Link PR");
+    prBtn.title = "Link a GitHub PR number for review wake-up polling";
+    prBtn.onclick = async () => {
+      const val = window.prompt("GitHub PR number (0 to unlink):", meta.pr_number ? String(meta.pr_number) : "");
+      if (val === null) return;
+      const num = parseInt(val.trim(), 10) || 0;
+      await updateSessionSettings(meta.session_id, { pr_number: num });
+    };
+    const polSel = el("select", "btn");
+    polSel.title = "PR review wake-up policy";
+    for (const opt of ["evaluate-and-stage", "auto-push", "off"]) {
+      const o = el("option", "", opt);
+      o.value = opt;
+      if ((meta.wake_policy || "evaluate-and-stage") === opt) o.selected = true;
+      polSel.append(o);
+    }
+    polSel.onchange = () => updateSessionSettings(meta.session_id, { wake_policy: polSel.value });
+    acts.append(prBtn, polSel);
+  }
+  if (meta.running && (meta.status === "active" || meta.status === "needs-attention")) {
     const pauseBtn = el("button", "btn", "Pause");
     pauseBtn.onclick = () => pauseCurrentSession();
     const closeBtn = el("button", "btn danger", "Close");
@@ -504,21 +526,41 @@ function paintTopbar(meta) {
   }
 }
 
+async function updateSessionSettings(id, patch) {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/settings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!r.ok) { notice("error", "failed to update session settings"); return; }
+  const updated = await r.json();
+  H.sessions.set(id, updated);
+  if (H.currentId === id) { H.currentMeta = updated; paintTopbar(updated); }
+  paintSidebar();
+}
+
 function showArchiveBanner(meta) {
   const banner = $("#archive-banner");
   banner.hidden = false;
   if (meta.status === "closed") {
     $("#archive-msg").textContent = "Read-only archived session (0 running daemons). Fork to continue in a new session.";
+  } else if (meta.status === "needs-attention") {
+    $("#archive-msg").textContent = meta.wake_summary || "PR review wake-up completed — review staged changes before pushing.";
   } else {
     $("#archive-msg").textContent = `Session is ${meta.status} (0 running daemons). Rejoin to restore workspace & continue.`;
   }
   const acts = $("#archive-actions");
   acts.textContent = "";
+  if (meta.last_review_session_id && H.sessions.has(meta.last_review_session_id)) {
+    const revBtn = el("button", "btn", "View CI Review");
+    revBtn.onclick = () => selectSession(meta.last_review_session_id, true);
+    acts.append(revBtn);
+  }
   if (meta.status === "closed") {
     const b = el("button", "btn primary", "Fork Session");
     b.onclick = () => forkSession(meta.session_id);
     acts.append(b);
-  } else if (!meta.session_kind || meta.session_kind === "interactive" || meta.session_kind === "analyst") {
+  } else if (!meta.running && (!meta.session_kind || meta.session_kind === "interactive" || meta.session_kind === "analyst")) {
     const b = el("button", "btn primary", "Rejoin Session");
     b.onclick = () => rejoinSession(meta.session_id);
     acts.append(b);

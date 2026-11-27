@@ -40,10 +40,19 @@ spec:
             - --k8s-gateway-url={{ .Values.sandbox.gatewayEndpoint }}
             - --k8s-model-catalog-configmap={{ .Values.sandbox.modelCatalogConfigMap }}
             - --k8s-idle-pause-seconds={{ .Values.sandbox.idlePauseSeconds }}
+            - --wakeup-interval={{ .Values.wakeup.intervalSeconds }}
           env:
             {{- if .Values.gcs.bucket }}
             - name: SESSION_GCS_BUCKET
               value: {{ .Values.gcs.bucket | quote }}
+            {{- end }}
+            {{- if .Values.wakeup.githubTokenSecretName }}
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.wakeup.githubTokenSecretName }}
+                  key: {{ .Values.wakeup.githubTokenSecretKey | default "token" }}
+                  optional: true
             {{- end }}
             {{- if .Values.sessionSink.secretName }}
             - name: SESSION_SINK_TOKEN

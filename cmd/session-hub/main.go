@@ -40,6 +40,8 @@ func main() {
 		archiveSinkToken = flag.String("archive-sink-token", os.Getenv("SESSION_SINK_TOKEN"), "bearer token accepted on POST /internal/archive for agentrunner CI archives")
 		allowedHosts     = flag.String("allowed-hosts", os.Getenv("SESSION_HUB_ALLOWED_HOSTS"), "comma-separated extra allowed Host headers")
 		flushIntervalSec = flag.Int("flush-interval", 30, "periodic flush interval (seconds) for spawned daemons")
+		wakeupInterval   = flag.Int("wakeup-interval", 60, "GitHub PR wake-up poll interval in seconds (0 disables polling)")
+		githubToken      = flag.String("github-token", os.Getenv("GITHUB_TOKEN"), "GitHub token for conditional ETag PR review wake-up polling")
 
 		// Kubernetes PodSpawner options (--spawner=k8s).
 		k8sNamespace      = flag.String("k8s-namespace", envOr("K8S_SANDBOX_NAMESPACE", k8s.DefaultNamespace), "namespace for sandbox Pods")
@@ -145,6 +147,17 @@ func main() {
 		TokenLookup:      tokenLookup,
 		AllowedHosts:     strings.Split(*allowedHosts, ","),
 	})
+
+	if *wakeupInterval > 0 && strings.TrimSpace(*githubToken) != "" {
+		watcher := hub.NewWakeWatcher(
+			srv,
+			&hub.GitHubReviewFetcher{Token: strings.TrimSpace(*githubToken)},
+			time.Duration(*wakeupInterval)*time.Second,
+		)
+		stopWatcher := watcher.Start(context.Background())
+		defer stopWatcher()
+		log.Printf("PR review wake-up watcher enabled (interval=%ds)", *wakeupInterval)
+	}
 
 	httpSrv := &http.Server{
 		Addr:    *addr,

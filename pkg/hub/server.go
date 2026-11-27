@@ -120,6 +120,7 @@ func (s *Server) Routes() http.Handler {
 	pub.HandleFunc("POST /api/sessions/{id}/pause", s.handlePauseSession)
 	pub.HandleFunc("POST /api/sessions/{id}/close", s.handleCloseSession)
 	pub.HandleFunc("POST /api/sessions/{id}/fork", s.handleForkSession)
+	pub.HandleFunc("POST /api/sessions/{id}/settings", s.handleUpdateSettings)
 
 	// Live session proxy to active pi-sessiond.
 	pub.HandleFunc("GET /s/{id}/{rest...}", s.handleSessionProxy)
@@ -269,17 +270,19 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	id := sessions.NewID()
 	now := time.Now().UTC().Format(time.RFC3339)
 	meta := &sessions.Metadata{
-		SessionID:   id,
-		SessionName: req.Name,
-		SessionKind: req.Kind,
-		Status:      sessions.StatusActive,
-		Repo:        req.Repo,
-		Branch:      req.Branch,
-		Toolchain:   req.Toolchain,
-		ModelConfig: map[string]any{"provider": req.Provider, "modelId": req.Model},
-		StartedAt:   now,
-		UpdatedAt:   now,
-		Running:     true,
+		SessionID:              id,
+		SessionName:            req.Name,
+		SessionKind:            req.Kind,
+		Status:                 sessions.StatusActive,
+		Repo:                   req.Repo,
+		Branch:                 req.Branch,
+		Toolchain:              req.Toolchain,
+		WakePolicy:             sessions.WakePolicyEvaluateAndStage,
+		MaxWakeupsPerHumanTurn: sessions.DefaultMaxWakeupsPerHumanTurn,
+		ModelConfig:            map[string]any{"provider": req.Provider, "modelId": req.Model},
+		StartedAt:              now,
+		UpdatedAt:              now,
+		Running:                true,
 	}
 	if err := s.saveMetadata(r.Context(), meta); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
@@ -378,6 +381,16 @@ func (s *Server) handleRejoinSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	rejoined, err := s.rejoinSession(r.Context(), meta)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, rejoined)
+}
+
+func (s *Server) rejoinSession(ctx context.Context, meta *sessions.Metadata) (*sessions.Metadata, error) {
+	id := meta.SessionID
 	provider, _ := meta.ModelConfig["provider"].(string)
 	modelID, _ := meta.ModelConfig["modelId"].(string)
 	if provider == "" {
@@ -388,7 +401,7 @@ func (s *Server) handleRejoinSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tok := s.tokens.Issue(id)
-	if _, err := s.spawner.Spawn(r.Context(), SpawnSpec{
+	if _, err := s.spawner.Spawn(ctx, SpawnSpec{
 		SessionID:   id,
 		SessionName: meta.SessionName,
 		SessionKind: meta.SessionKind,
@@ -400,16 +413,106 @@ func (s *Server) handleRejoinSession(w http.ResponseWriter, r *http.Request) {
 		HubURL:      s.hubBaseURL,
 		HubToken:    tok,
 	}); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"success": false, "error": err.Error()})
-		return
+		return nil, err
 	}
 
 	meta.Status = sessions.StatusActive
 	meta.Running = true
 	meta.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	_ = s.saveMetadata(r.Context(), meta)
+	_ = s.saveMetadata(ctx, meta)
+	s.broadcastSessionUpdate(meta)
+	return meta, nil
+}
+
+func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	meta, err := s.loadMetadata(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sessions.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "session not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	if meta.SessionKind.IsAutomated() {
+		writeJSON(w, http.StatusConflict, map[string]any{"success": false, "error": "cannot modify automated CI session settings"})
+		return
+	}
+
+	var req struct {
+		Repo                   *string              `json:"repo"`
+		Branch                 *string              `json:"branch"`
+		HeadSHA                *string              `json:"head_sha"`
+		PRNumber               *int                 `json:"pr_number"`
+		WakePolicy             *sessions.WakePolicy `json:"wake_policy"`
+		MaxWakeupsPerHumanTurn *int                 `json:"max_wakeups_per_human_turn"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "bad request: " + err.Error()})
+		return
+	}
+	if req.Repo != nil {
+		meta.Repo = strings.TrimSpace(*req.Repo)
+	}
+	if req.Branch != nil {
+		meta.Branch = strings.TrimSpace(*req.Branch)
+	}
+	if req.HeadSHA != nil {
+		meta.HeadSHA = strings.TrimSpace(*req.HeadSHA)
+	}
+	if req.PRNumber != nil {
+		meta.PRNumber = *req.PRNumber
+	}
+	if req.WakePolicy != nil {
+		switch *req.WakePolicy {
+		case sessions.WakePolicyEvaluateAndStage, sessions.WakePolicyAutoPush, sessions.WakePolicyOff:
+			meta.WakePolicy = *req.WakePolicy
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "invalid wake_policy"})
+			return
+		}
+	}
+	if req.MaxWakeupsPerHumanTurn != nil && *req.MaxWakeupsPerHumanTurn >= 0 {
+		meta.MaxWakeupsPerHumanTurn = *req.MaxWakeupsPerHumanTurn
+	}
+	meta.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := s.saveMetadata(r.Context(), meta); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": err.Error()})
+		return
+	}
+	meta.Running = s.spawner != nil && s.spawner.Running(id)
 	s.broadcastSessionUpdate(meta)
 	writeJSON(w, http.StatusOK, meta)
+}
+
+// resetHumanTurn resets the anti-ping-pong wake-up counter whenever a human
+// sends a prompt, steer, or follow_up command through the browser UI.
+func (s *Server) resetHumanTurn(sessionID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	meta, err := s.loadMetadata(ctx, sessionID)
+	if err != nil || meta == nil {
+		return
+	}
+	changed := false
+	if meta.WakeupsSinceHumanTurn != 0 {
+		meta.WakeupsSinceHumanTurn = 0
+		changed = true
+	}
+	if meta.Status == sessions.StatusNeedsAttention {
+		meta.Status = sessions.StatusActive
+		meta.WakeSummary = ""
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	meta.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := s.saveMetadata(ctx, meta); err == nil {
+		meta.Running = s.spawner != nil && s.spawner.Running(sessionID)
+		s.broadcastSessionUpdate(meta)
+	}
 }
 
 func (s *Server) handlePauseSession(w http.ResponseWriter, r *http.Request) {

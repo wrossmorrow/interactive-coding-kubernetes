@@ -37,6 +37,12 @@ sessionSink:
   secretKey: token
   optional: true
 
+# Optional outbound conditional-ETag GitHub PR review wake-up poller.
+wakeup:
+  intervalSeconds: 60
+  githubTokenSecretName: ""
+  githubTokenSecretKey: token
+
 # Sandbox Pod configuration passed to session-hub's K8sPodSpawner.
 sandbox:
   imageRepository: ghcr.io/wrossmorrow
