@@ -40,9 +40,14 @@ func NewPodSpawner(client kubernetes.Interface, cfg PodConfig, onExit func(sessi
 
 func (p *PodSpawner) ensureNamespacePolicies(ctx context.Context, hubURL string) error {
 	cm := BuildEgressConfigMap(p.cfg, hubURL)
-	if _, err := p.client.CoreV1().ConfigMaps(p.cfg.Namespace).Get(ctx, cm.Name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
+	if existing, err := p.client.CoreV1().ConfigMaps(p.cfg.Namespace).Get(ctx, cm.Name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
 		if _, cerr := p.client.CoreV1().ConfigMaps(p.cfg.Namespace).Create(ctx, cm, metav1.CreateOptions{}); cerr != nil && !apierrors.IsAlreadyExists(cerr) {
 			return fmt.Errorf("create egress configmap: %w", cerr)
+		}
+	} else if err == nil && existing.Data["squid.conf"] != cm.Data["squid.conf"] {
+		existing.Data = cm.Data
+		if _, uerr := p.client.CoreV1().ConfigMaps(p.cfg.Namespace).Update(ctx, existing, metav1.UpdateOptions{}); uerr != nil {
+			return fmt.Errorf("update egress configmap: %w", uerr)
 		}
 	}
 

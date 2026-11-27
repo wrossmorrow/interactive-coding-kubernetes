@@ -36,12 +36,12 @@ const (
 )
 
 // DefaultEgressAllowlist covers GitHub and standard language package registries.
+// Note: Squid 5.x rejects overlapping dstdomain entries (e.g. both "github.com"
+// and ".github.com"), so wildcard entries like ".github.com" must not be paired
+// with their apex or subdomains.
 var DefaultEgressAllowlist = []string{
-	"github.com",
 	".github.com",
-	"api.github.com",
-	"objects.githubusercontent.com",
-	"raw.githubusercontent.com",
+	".githubusercontent.com",
 	"proxy.golang.org",
 	"sum.golang.org",
 	"pypi.org",
