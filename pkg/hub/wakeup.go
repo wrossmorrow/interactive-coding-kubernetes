@@ -266,12 +266,15 @@ func (w *WakeWatcher) checkSession(ctx context.Context, meta *sessions.Metadata)
 	if err != nil {
 		return err
 	}
-	if nextETag != "" {
-		w.mu.Lock()
-		w.etags[prKey] = nextETag
-		w.mu.Unlock()
+	storeETag := func() {
+		if nextETag != "" {
+			w.mu.Lock()
+			w.etags[prKey] = nextETag
+			w.mu.Unlock()
+		}
 	}
 	if notModified || len(reviews) == 0 {
+		storeETag()
 		return nil
 	}
 
@@ -288,10 +291,17 @@ func (w *WakeWatcher) checkSession(ctx context.Context, meta *sessions.Metadata)
 		}
 	}
 	if latest == nil {
+		storeETag()
 		return nil
 	}
 
-	return w.hub.TriggerWakeup(ctx, meta, *latest)
+	// Only advance the cached ETag after TriggerWakeup succeeds so a transient
+	// rejoin or prompt-injection failure is retried on the next poll tick.
+	if err := w.hub.TriggerWakeup(ctx, meta, *latest); err != nil {
+		return err
+	}
+	storeETag()
+	return nil
 }
 
 // TriggerWakeup rehydrates (if paused) and injects a wake-up prompt into an

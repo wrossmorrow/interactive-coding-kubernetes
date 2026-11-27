@@ -54,6 +54,11 @@ func (s *Server) handleInternalPutObject(w http.ResponseWriter, r *http.Request)
 		// periodic daemon flushes never clobber hub state.
 		var incoming sessions.Metadata
 		if err := json.Unmarshal(body, &incoming); err == nil {
+			if incoming.SessionID != "" && incoming.SessionID != id {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "metadata session_id does not match URL session id"})
+				return
+			}
+			incoming.SessionID = id
 			s.metaMu.Lock()
 			if existing, lerr := s.loadMetadata(r.Context(), id); lerr == nil && existing != nil {
 				mergeHubMetadata(&incoming, existing)
@@ -86,9 +91,11 @@ func mergeHubMetadata(incoming, existing *sessions.Metadata) {
 	if incoming.ForkedFrom == "" {
 		incoming.ForkedFrom = existing.ForkedFrom
 	}
-	if incoming.PRNumber == 0 && existing.PRNumber > 0 {
-		incoming.PRNumber = existing.PRNumber
+	if incoming.HeadSHA == "" {
+		incoming.HeadSHA = existing.HeadSHA
 	}
+	// Hub-owned PR linkage and wake-up bookkeeping are authoritative.
+	incoming.PRNumber = existing.PRNumber
 	if existing.WakePolicy != "" {
 		incoming.WakePolicy = existing.WakePolicy
 	}

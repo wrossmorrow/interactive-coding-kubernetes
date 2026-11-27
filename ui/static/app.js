@@ -497,8 +497,12 @@ function paintTopbar(meta) {
     prBtn.onclick = async () => {
       const val = window.prompt("GitHub PR number (0 to unlink):", meta.pr_number ? String(meta.pr_number) : "");
       if (val === null) return;
-      const num = parseInt(val.trim(), 10) || 0;
-      await updateSessionSettings(meta.session_id, { pr_number: num });
+      const trimmed = val.trim();
+      if (!/^\d+$/.test(trimmed)) {
+        notice("error", "PR number must be a non-negative integer (0 to unlink)");
+        return;
+      }
+      await updateSessionSettings(meta.session_id, { pr_number: parseInt(trimmed, 10) });
     };
     const polSel = el("select", "btn");
     polSel.title = "PR review wake-up policy";

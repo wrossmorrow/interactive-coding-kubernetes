@@ -483,7 +483,21 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		meta.HeadSHA = strings.TrimSpace(*req.HeadSHA)
 	}
 	if req.PRNumber != nil {
-		meta.PRNumber = *req.PRNumber
+		if *req.PRNumber != meta.PRNumber {
+			meta.PRNumber = *req.PRNumber
+			meta.LastProcessedReviewID = 0
+			meta.WakeupsSinceHumanTurn = 0
+			meta.LastReviewSessionID = ""
+			meta.WakeSummary = ""
+			meta.LastWakeAt = ""
+			if meta.Status == sessions.StatusNeedsAttention {
+				if s.spawner != nil && s.spawner.Running(id) {
+					meta.Status = sessions.StatusActive
+				} else {
+					meta.Status = sessions.StatusPaused
+				}
+			}
+		}
 	}
 	if req.WakePolicy != nil {
 		meta.WakePolicy = *req.WakePolicy

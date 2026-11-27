@@ -40,7 +40,7 @@ spec:
             - --k8s-gateway-url={{ .Values.sandbox.gatewayEndpoint }}
             - --k8s-model-catalog-configmap={{ .Values.sandbox.modelCatalogConfigMap }}
             - --k8s-idle-pause-seconds={{ .Values.sandbox.idlePauseSeconds }}
-            - --wakeup-interval={{ .Values.wakeup.intervalSeconds }}
+            - --wakeup-interval={{ .Values.wakeup.intervalSeconds | default 0 }}
           env:
             {{- if .Values.gcs.bucket }}
             - name: SESSION_GCS_BUCKET
@@ -48,9 +48,9 @@ spec:
             {{- end }}
             {{- if .Values.wakeup.githubAppSecretName }}
             - name: GITHUB_APP_ID
-              value: {{ .Values.sandbox.githubApp.appId | quote }}
+              value: {{ required "sandbox.githubApp.appId is required when wakeup.githubAppSecretName is set" .Values.sandbox.githubApp.appId | quote }}
             - name: GITHUB_APP_INSTALLATION_ID
-              value: {{ .Values.sandbox.githubApp.installationId | quote }}
+              value: {{ required "sandbox.githubApp.installationId is required when wakeup.githubAppSecretName is set" .Values.sandbox.githubApp.installationId | quote }}
             - name: GITHUB_APP_PRIVATE_KEY_PATH
               value: "/run/secrets/gh-app/{{ .Values.wakeup.githubAppKeyFile | default "private-key.pem" }}"
             {{- else if .Values.wakeup.githubTokenSecretName }}

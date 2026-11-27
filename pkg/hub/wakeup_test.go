@@ -280,10 +280,11 @@ func TestDaemonMetadataFlushPreservesHubWakeupFields(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Simulate pi-sessiond periodic flush sending stale status="active" and zeroed wake fields.
+	// Simulate pi-sessiond periodic flush sending stale status="active", stale PRNumber=99, and zeroed wake fields.
 	daemonFlush := sessions.Metadata{
 		SessionID:  "sess-merge-1",
 		Status:     sessions.StatusActive,
+		PRNumber:   99,
 		LastOffset: 2048,
 		PartCount:  3,
 	}
@@ -310,13 +311,38 @@ func TestDaemonMetadataFlushPreservesHubWakeupFields(t *testing.T) {
 		t.Fatalf("daemon upload progress fields were lost: %+v", got)
 	}
 
-	// Also verify negative max_wakeups_per_human_turn returns 400.
-	badReq := httptest.NewRequest(http.MethodPost, "/api/sessions/sess-merge-1/settings", strings.NewReader(`{"max_wakeups_per_human_turn":-1}`))
+	// Cross-session session_id mismatch in PUT body must be rejected with 400.
+	crossReq := httptest.NewRequest(http.MethodPut, "/internal/sessions/sess-merge-1/objects/metadata.json", strings.NewReader(`{"session_id":"other-session","status":"active"}`))
+	crossReq.Header.Set("Authorization", "Bearer tok-merge")
+	crossReq.Header.Set("Content-Type", "application/json")
+	crossW := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(crossW, crossReq)
+	if crossW.Code != http.StatusBadRequest {
+		t.Fatalf("cross-session metadata PUT status = %d, want 400", crossW.Code)
+	}
+
+	// Relinking PR (42 -> 43) must reset per-PR wake-up bookkeeping and clear needs-attention.
+	relinkReq := httptest.NewRequest(http.MethodPost, "/api/sessions/sess-merge-1/settings", strings.NewReader(`{"pr_number":43}`))
+	relinkReq.Host = "localhost"
+	relinkReq.Header.Set("Content-Type", "application/json")
+	relinkW := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(relinkW, relinkReq)
+	if relinkW.Code != http.StatusOK {
+		t.Fatalf("relink PR status = %d: %s", relinkW.Code, relinkW.Body.String())
+	}
+	var relinked sessions.Metadata
+	_ = json.Unmarshal(relinkW.Body.Bytes(), &relinked)
+	if relinked.PRNumber != 43 || relinked.LastProcessedReviewID != 0 || relinked.WakeupsSinceHumanTurn != 0 || relinked.WakeSummary != "" || relinked.Status != sessions.StatusActive {
+		t.Fatalf("relink PR did not reset wake-up bookkeeping: %+v", relinked)
+	}
+
+	// Negative max_wakeups_per_human_turn or 0 must return 400.
+	badReq := httptest.NewRequest(http.MethodPost, "/api/sessions/sess-merge-1/settings", strings.NewReader(`{"max_wakeups_per_human_turn":0}`))
 	badReq.Host = "localhost"
 	badReq.Header.Set("Content-Type", "application/json")
 	badW := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(badW, badReq)
 	if badW.Code != http.StatusBadRequest {
-		t.Fatalf("negative max_wakeups_per_human_turn status = %d, want 400", badW.Code)
+		t.Fatalf("zero max_wakeups_per_human_turn status = %d, want 400", badW.Code)
 	}
 }
