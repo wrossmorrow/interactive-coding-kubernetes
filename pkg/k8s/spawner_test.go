@@ -729,6 +729,75 @@ func TestSpawnAdoptsConcurrentPodOnCreateAlreadyExists(t *testing.T) {
 	if got.UID != "uid-new-gen" {
 		t.Fatalf("pod UID = %q, want adopted uid-new-gen", got.UID)
 	}
+	// The token secret this Spawn (re)created must be bound to the adopted
+	// pod for GC, not left orphaned.
+	sec, err := cs.CoreV1().Secrets(cfg.Namespace).Get(ctx, TokenSecretName(spec.SessionID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get token secret: %v", err)
+	}
+	if len(sec.OwnerReferences) != 1 || sec.OwnerReferences[0].UID != "uid-new-gen" || sec.OwnerReferences[0].Kind != "Pod" {
+		t.Fatalf("secret owner refs = %+v, want exactly one Pod ref with UID uid-new-gen", sec.OwnerReferences)
+	}
+}
+
+func TestSpawnAEXAdoptFailureCleansUpSecret(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
+	if _, err := cs.CoreV1().Pods(cfg.Namespace).Create(context.Background(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: PodName("sess-aex-fail"), Namespace: cfg.Namespace, UID: types.UID("uid-old")},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.42.0.77",
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "agent", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+			},
+		},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create stale pod: %v", err)
+	}
+	tracker := cs.Tracker()
+	cs.PrependReactor("create", "pods", func(action fstesting.Action) (bool, runtime.Object, error) {
+		create := action.(fstesting.CreateAction)
+		obj := create.GetObject().(*corev1.Pod)
+		// The concurrent replacement has an IP but is unreachable, so the
+		// adopt's health check fails.
+		concurrent := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: obj.Name, Namespace: cfg.Namespace, UID: types.UID("uid-new-gen")},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.42.0.200",
+				ContainerStatuses: []corev1.ContainerStatus{
+					{Name: "agent", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+				},
+			},
+		}
+		_ = tracker.Add(concurrent)
+		return true, nil, apierrors.NewAlreadyExists(corev1.Resource("pods"), obj.Name)
+	})
+	spawner := NewPodSpawner(cs, cfg, nil)
+	spawner.healthyWait = 500 * time.Millisecond
+	// Health checks enabled (skipHealthCheck stays false).
+
+	spec := hub.SpawnSpec{
+		SessionID:   "sess-aex-fail",
+		SessionKind: sessions.KindInteractive,
+		Toolchain:   "golang",
+		HubURL:      "http://session-hub.session-system.svc.cluster.local:8787",
+		HubToken:    "tok-aex-fail",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := spawner.Spawn(ctx, spec); err == nil {
+		t.Fatal("Spawn succeeded, want the failed adopt to surface an error")
+	} else if !strings.Contains(err.Error(), "health check failed") {
+		t.Fatalf("error = %q, want a replacement health check failure", err)
+	}
+	// The token secret created before the pod Create must not survive a
+	// failed adopt (no pod owns it for GC).
+	if _, err := cs.CoreV1().Secrets(cfg.Namespace).Get(ctx, TokenSecretName(spec.SessionID), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("token secret after failed adopt: err = %v, want NotFound (secret deleted)", err)
+	}
 }
 
 func TestReplacingMarkRefcountsOverlappingSpawns(t *testing.T) {

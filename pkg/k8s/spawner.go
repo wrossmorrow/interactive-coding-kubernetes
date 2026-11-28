@@ -145,7 +145,21 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 			// A concurrent Spawn created the replacement between our
 			// confirmation Get and this Create; adopt it rather than
 			// failing on a healthy, already-replaced session.
-			return p.adoptExistingPod(ctx, spec, podName)
+			ep, aerr := p.adoptExistingPod(ctx, spec, podName)
+			if aerr != nil {
+				_ = p.client.CoreV1().Secrets(ns).Delete(context.Background(), createdSec.Name, metav1.DeleteOptions{})
+				return "", aerr
+			}
+			// Bind the token secret we just (re)created to the adopted pod
+			// for GC; the creator's own owner-ref update may have raced our
+			// Delete+Create on the secret and been lost.
+			if adopted, gerr := p.client.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{}); gerr == nil {
+				createdSec.OwnerReferences = []metav1.OwnerReference{
+					{APIVersion: "v1", Kind: "Pod", Name: adopted.Name, UID: adopted.UID},
+				}
+				_, _ = p.client.CoreV1().Secrets(ns).Update(ctx, createdSec, metav1.UpdateOptions{})
+			}
+			return ep, nil
 		}
 		_ = p.client.CoreV1().Secrets(ns).Delete(context.Background(), sec.Name, metav1.DeleteOptions{})
 		return "", fmt.Errorf("create sandbox pod: %w", err)
