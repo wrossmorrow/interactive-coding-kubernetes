@@ -156,3 +156,63 @@ func TestPodSpawnerLifecycleAndRediscovery(t *testing.T) {
 		t.Fatal("expected Running=false after Stop")
 	}
 }
+
+func TestBuildTokenSecretAndVerifyAnalystToken(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
+	spawner := NewPodSpawner(cs, cfg, nil)
+	ctx := context.Background()
+
+	interactiveSec := BuildTokenSecret(cfg.Namespace, "sess-int-1", "hub-tok-int", "")
+	if _, ok := interactiveSec.Labels[LabelKind]; ok {
+		t.Fatalf("interactive secret should not carry analyst label, got %q", interactiveSec.Labels[LabelKind])
+	}
+	if _, ok := interactiveSec.StringData["analyst-token"]; ok {
+		t.Fatal("interactive secret should not carry analyst-token")
+	}
+
+	analystSec := BuildTokenSecret(cfg.Namespace, "sess-an-1", "hub-tok-an", "an_stringdata_secret")
+	if analystSec.Labels[LabelKind] != string(sessions.KindAnalyst) {
+		t.Fatalf("analyst secret label = %q, want %q", analystSec.Labels[LabelKind], sessions.KindAnalyst)
+	}
+	if analystSec.StringData["analyst-token"] != "an_stringdata_secret" {
+		t.Fatalf("analyst secret StringData[analyst-token] = %q, want an_stringdata_secret", analystSec.StringData["analyst-token"])
+	}
+
+	// Second analyst secret simulating real apiserver storage in Data (byte slice).
+	analystDataSec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      TokenSecretName("sess-an-2"),
+			Namespace: cfg.Namespace,
+			Labels: map[string]string{
+				LabelKind: string(sessions.KindAnalyst),
+			},
+		},
+		Data: map[string][]byte{
+			"token":         []byte("hub-tok-an-2"),
+			"analyst-token": []byte("an_data_secret"),
+		},
+	}
+
+	for _, sec := range []*corev1.Secret{interactiveSec, analystSec, analystDataSec} {
+		if _, err := cs.CoreV1().Secrets(cfg.Namespace).Create(ctx, sec, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create secret %s: %v", sec.Name, err)
+		}
+	}
+
+	if !spawner.VerifyAnalystToken("an_stringdata_secret") {
+		t.Fatal("VerifyAnalystToken should match StringData analyst-token")
+	}
+	if !spawner.VerifyAnalystToken("an_data_secret") {
+		t.Fatal("VerifyAnalystToken should match Data analyst-token")
+	}
+	if spawner.VerifyAnalystToken("") {
+		t.Fatal("VerifyAnalystToken should reject empty token")
+	}
+	if spawner.VerifyAnalystToken("hub-tok-int") {
+		t.Fatal("VerifyAnalystToken should reject interactive hub token")
+	}
+	if spawner.VerifyAnalystToken("an_wrong_token") {
+		t.Fatal("VerifyAnalystToken should reject unknown analyst token")
+	}
+}

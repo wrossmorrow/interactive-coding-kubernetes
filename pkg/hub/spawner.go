@@ -43,17 +43,18 @@ type Spawner interface {
 
 // LocalSpawnerConfig configures LocalSpawner for local dev and E2E tests.
 type LocalSpawnerConfig struct {
-	SessiondBin      string
-	WorkRoot         string
-	PiBin            string
-	PiArgs           string
-	AgentsMDPath     string
-	ModelCatalogPath string
-	GatewayURL       string
-	GatewayToken     string
-	FlushIntervalSec int
-	IdlePauseSec     int
-	OnExit           func(sessionID string)
+	SessiondBin         string
+	WorkRoot            string
+	PiBin               string
+	PiArgs              string
+	AgentsMDPath        string
+	AnalystAgentsMDPath string
+	ModelCatalogPath    string
+	GatewayURL          string
+	GatewayToken        string
+	FlushIntervalSec    int
+	IdlePauseSec        int
+	OnExit              func(sessionID string)
 }
 
 type localProc struct {
@@ -134,8 +135,15 @@ func (l *LocalSpawner) Spawn(ctx context.Context, spec SpawnSpec) (string, error
 	if spec.Model != "" {
 		env = append(env, "PI_MODEL="+spec.Model)
 	}
-	if l.cfg.AgentsMDPath != "" {
-		env = append(env, "PI_AGENTS_MD="+l.cfg.AgentsMDPath)
+	agentsMD := l.cfg.AgentsMDPath
+	if spec.SessionKind == sessions.KindAnalyst && l.cfg.AnalystAgentsMDPath != "" {
+		agentsMD = l.cfg.AnalystAgentsMDPath
+	}
+	if agentsMD != "" {
+		if abs, err := filepath.Abs(agentsMD); err == nil {
+			agentsMD = abs
+		}
+		env = append(env, "PI_AGENTS_MD="+agentsMD)
 	}
 	if l.cfg.ModelCatalogPath != "" {
 		env = append(env, "PI_MODEL_CATALOG="+l.cfg.ModelCatalogPath)
