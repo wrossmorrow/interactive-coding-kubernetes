@@ -20,7 +20,9 @@ COPY ext/session-attribution/ /opt/pi-ext/session-attribution/
 COPY agents/base.md /opt/agents/base.md
 COPY agents/analyst.md /opt/agents/analyst.md
 RUN mkdir -p /work/repo \
-    && chown -R node:node /work /opt/pi-ext /opt/agents
+    && chown -R node:node /work /opt/pi-ext /opt/agents \
+    && git config --system --add credential.https://github.com.helper "" \
+    && git config --system --add credential.https://github.com.helper '!/usr/local/bin/gh auth git-credential'
 
 ENV PI_EXTENSION_PATH=/opt/pi-ext/session-attribution/index.ts \
     PI_AGENTS_MD=/opt/agents/base.md \
