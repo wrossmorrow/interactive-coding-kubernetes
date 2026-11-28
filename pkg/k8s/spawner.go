@@ -146,18 +146,22 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 			// confirmation Get and this Create; adopt it rather than
 			// failing on a healthy, already-replaced session.
 			ep, aerr := p.adoptExistingPod(ctx, spec, podName)
-			if aerr != nil {
-				_ = p.client.CoreV1().Secrets(ns).Delete(context.Background(), createdSec.Name, metav1.DeleteOptions{})
-				return "", aerr
-			}
-			// Bind the token secret we just (re)created to the adopted pod
-			// for GC; the creator's own owner-ref update may have raced our
-			// Delete+Create on the secret and been lost.
+			// The token secret we (re)created above is shared session
+			// state, and our Delete+Create may have lost the creator's
+			// owner-ref binding, so re-bind it to the pod that holds the
+			// name for GC (on a failed adopt the pod may still be alive
+			// and be Stopped by its creator, at which point the secret
+			// must go with it). Never delete the secret on a failed
+			// adopt: the pod may still be alive and authenticates against
+			// it.
 			if adopted, gerr := p.client.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{}); gerr == nil {
 				createdSec.OwnerReferences = []metav1.OwnerReference{
 					{APIVersion: "v1", Kind: "Pod", Name: adopted.Name, UID: adopted.UID},
 				}
 				_, _ = p.client.CoreV1().Secrets(ns).Update(ctx, createdSec, metav1.UpdateOptions{})
+			}
+			if aerr != nil {
+				return "", aerr
 			}
 			return ep, nil
 		}

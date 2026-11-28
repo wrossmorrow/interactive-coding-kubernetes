@@ -740,7 +740,7 @@ func TestSpawnAdoptsConcurrentPodOnCreateAlreadyExists(t *testing.T) {
 	}
 }
 
-func TestSpawnAEXAdoptFailureCleansUpSecret(t *testing.T) {
+func TestSpawnAEXAdoptFailureKeepsSharedSecret(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
 	if _, err := cs.CoreV1().Pods(cfg.Namespace).Create(context.Background(), &corev1.Pod{
@@ -793,10 +793,16 @@ func TestSpawnAEXAdoptFailureCleansUpSecret(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "health check failed") {
 		t.Fatalf("error = %q, want a replacement health check failure", err)
 	}
-	// The token secret created before the pod Create must not survive a
-	// failed adopt (no pod owns it for GC).
-	if _, err := cs.CoreV1().Secrets(cfg.Namespace).Get(ctx, TokenSecretName(spec.SessionID), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("token secret after failed adopt: err = %v, want NotFound (secret deleted)", err)
+	// The shared token secret must survive a failed adopt: the adopted pod
+	// is still alive (its creator owns its lifecycle) and authenticates
+	// against it, so deleting it would brick the replacement session. It
+	// must also stay bound to the pod for GC.
+	sec, err := cs.CoreV1().Secrets(cfg.Namespace).Get(ctx, TokenSecretName(spec.SessionID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("token secret after failed adopt: %v, want kept (pod still alive)", err)
+	}
+	if len(sec.OwnerReferences) != 1 || sec.OwnerReferences[0].UID != "uid-new-gen" || sec.OwnerReferences[0].Kind != "Pod" {
+		t.Fatalf("secret owner refs = %+v, want exactly one Pod ref with UID uid-new-gen", sec.OwnerReferences)
 	}
 }
 
