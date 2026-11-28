@@ -189,6 +189,12 @@ func TestAgentContainerTerminatedInRunningPod(t *testing.T) {
 		t.Fatalf("create terminated pod: %v", err)
 	}
 
+	// A stale cached endpoint must be invalidated, not blindly returned.
+	spawner.setEndpoint(spec.SessionID, "http://10.42.0.99:8787")
+	if ep, ok := spawner.Endpoint(spec.SessionID); ok {
+		t.Fatalf("Endpoint with stale cache = (%q, true), want (\"\", false)", ep)
+	}
+
 	// Endpoint/Running must treat the pod as not running even though phase is Running.
 	if ep, ok := spawner.Endpoint(spec.SessionID); ok {
 		t.Fatalf("Endpoint = (%q, true), want (\"\", false) for terminated agent container", ep)

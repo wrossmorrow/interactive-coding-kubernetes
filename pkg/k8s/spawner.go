@@ -71,15 +71,19 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 	ns := p.cfg.Namespace
 	podName := PodName(spec.SessionID)
 
-	// Clean up any prior completed/failed Pod (including Pods whose agent
-	// container terminated while a native sidecar is still shutting down).
+	// Clean up any prior Pod that is not actively running (completed/failed,
+	// or a Running pod whose agent container terminated while a native
+	// sidecar is still shutting down). The agent is already dead in both
+	// cases, so force-delete to release the pod name quickly; waitDeleted is
+	// a best-effort bound below.
 	if existing, err := p.client.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{}); err == nil {
 		if podAgentRunning(existing) {
 			ep := fmt.Sprintf("http://%s:%d", existing.Status.PodIP, p.cfg.SessiondPort)
 			p.setEndpoint(spec.SessionID, ep)
 			return ep, nil
 		}
-		_ = p.client.CoreV1().Pods(ns).Delete(ctx, podName, metav1.DeleteOptions{})
+		graceZero := int64(0)
+		_ = p.client.CoreV1().Pods(ns).Delete(ctx, podName, metav1.DeleteOptions{GracePeriodSeconds: &graceZero})
 		p.waitDeleted(ctx, podName)
 	}
 
@@ -128,24 +132,42 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 }
 
 func (p *PodSpawner) Endpoint(sessionID string) (string, bool) {
+	var cached string
 	p.mu.RLock()
-	ep, ok := p.endpoints[sessionID]
-	p.mu.RUnlock()
-	if ok {
-		return ep, true
+	if ep, ok := p.endpoints[sessionID]; ok {
+		cached = ep
 	}
-	// Fallback lookup in Kubernetes so session-hub restarts seamlessly
-	// rediscover already-running sandbox Pods.
+	p.mu.RUnlock()
+
+	// Verify against Kubernetes (also the fallback lookup path when no
+	// cached endpoint exists, so session-hub restarts seamlessly rediscover
+	// already-running sandbox Pods).
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	pod, err := p.client.CoreV1().Pods(p.cfg.Namespace).Get(ctx, PodName(sessionID), metav1.GetOptions{})
-	if err != nil {
+	switch {
+	case apierrors.IsNotFound(err):
+		// Pod is gone; drop any stale cached endpoint.
+		if cached != "" {
+			p.clearEndpoint(sessionID)
+		}
 		return "", false
-	}
-	if podAgentRunning(pod) {
-		ep = fmt.Sprintf("http://%s:%d", pod.Status.PodIP, p.cfg.SessiondPort)
+	case err == nil && !podAgentRunning(pod):
+		// Agent terminated or pod leaving: drop the stale cached entry
+		// before watchExit's next tick would clear it.
+		if cached != "" {
+			p.clearEndpoint(sessionID)
+		}
+		return "", false
+	case err == nil:
+		ep := fmt.Sprintf("http://%s:%d", pod.Status.PodIP, p.cfg.SessiondPort)
 		p.setEndpoint(sessionID, ep)
 		return ep, true
+	}
+	// Transient API error: keep returning the recently-validated cached
+	// endpoint if we have one.
+	if cached != "" {
+		return cached, true
 	}
 	return "", false
 }
@@ -264,7 +286,9 @@ func (p *PodSpawner) waitPodIP(ctx context.Context, podName string) (string, err
 }
 
 func (p *PodSpawner) waitDeleted(ctx context.Context, podName string) {
-	deadline := time.NewTimer(15 * time.Second)
+	// Deadline runs past the default 30s pod termination grace period so a
+	// slow sidecar exit does not leave the pod name held when Spawn creates.
+	deadline := time.NewTimer(45 * time.Second)
 	defer deadline.Stop()
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
