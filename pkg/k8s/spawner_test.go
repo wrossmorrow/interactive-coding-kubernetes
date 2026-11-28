@@ -382,6 +382,37 @@ func TestSpawnFailsClearlyWhenStalePodSurvivesForceDelete(t *testing.T) {
 	}
 }
 
+func TestReplacingMarkRefcountsOverlappingSpawns(t *testing.T) {
+	spawner := NewPodSpawner(fake.NewSimpleClientset(), PodConfig{Namespace: "interactive-sessions"}.WithDefaults(), nil)
+	sessionID := "sess-refcount"
+
+	if spawner.isReplacing(sessionID) {
+		t.Fatal("isReplacing = true before any mark")
+	}
+	// Two overlapping Spawns for the same session: the first one's deferred
+	// unmark must not lift the mute while the second is still in its gap.
+	spawner.markReplacing(sessionID)
+	spawner.markReplacing(sessionID)
+	spawner.unmarkReplacing(sessionID)
+	if !spawner.isReplacing(sessionID) {
+		t.Fatal("isReplacing = false after one of two overlapping marks cleared")
+	}
+	spawner.unmarkReplacing(sessionID)
+	if spawner.isReplacing(sessionID) {
+		t.Fatal("isReplacing = true after all marks cleared")
+	}
+	// Unmark with no outstanding mark is a no-op (never drives count negative).
+	spawner.unmarkReplacing(sessionID)
+	spawner.markReplacing(sessionID)
+	if !spawner.isReplacing(sessionID) {
+		t.Fatal("isReplacing = false after mark")
+	}
+	spawner.unmarkReplacing(sessionID)
+	if spawner.isReplacing(sessionID) {
+		t.Fatal("isReplacing = true after mark cleared")
+	}
+}
+
 func TestBuildTokenSecretAndLookupAnalystToken(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()

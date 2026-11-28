@@ -27,7 +27,7 @@ type PodSpawner struct {
 
 	mu        sync.RWMutex
 	endpoints map[string]string // sessionID -> http://<podIP>:<port>
-	replacing map[string]bool   // sessionID -> Spawn is mid delete->create replacement
+	replacing map[string]int    // sessionID -> number of Spawns mid delete->create replacement
 
 	// Polling tunables, overridable in unit tests.
 	exitPoll   time.Duration // watchExit poll interval
@@ -41,7 +41,7 @@ func NewPodSpawner(client kubernetes.Interface, cfg PodConfig, onExit func(sessi
 		cfg:        cfg.WithDefaults(),
 		onExit:     onExit,
 		endpoints:  map[string]string{},
-		replacing:  map[string]bool{},
+		replacing:  map[string]int{},
 		exitPoll:   3 * time.Second,
 		deleteWait: 45 * time.Second,
 	}
@@ -285,25 +285,32 @@ func (p *PodSpawner) clearEndpoint(sessionID string) {
 	p.mu.Unlock()
 }
 
-// markReplacing, unmarkReplacing, and isReplacing track whether Spawn is mid
-// delete->create replacement for a session, so the old pod generation's
-// watchExit can distinguish an intentional replacement gap from a real exit.
+// markReplacing, unmarkReplacing, and isReplacing refcount how many Spawn
+// calls are mid delete->create replacement for a session, so the old pod
+// generation's watchExit can distinguish an intentional replacement gap
+// from a real exit. The refcount matters because overlapping Spawns for the
+// same session have no per-session lock: one Spawn's deferred unmark must
+// not clear the mute while another Spawn is still in its gap.
 func (p *PodSpawner) markReplacing(sessionID string) {
 	p.mu.Lock()
-	p.replacing[sessionID] = true
+	p.replacing[sessionID]++
 	p.mu.Unlock()
 }
 
 func (p *PodSpawner) unmarkReplacing(sessionID string) {
 	p.mu.Lock()
-	delete(p.replacing, sessionID)
+	if p.replacing[sessionID] > 1 {
+		p.replacing[sessionID]--
+	} else {
+		delete(p.replacing, sessionID)
+	}
 	p.mu.Unlock()
 }
 
 func (p *PodSpawner) isReplacing(sessionID string) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.replacing[sessionID]
+	return p.replacing[sessionID] > 0
 }
 
 func (p *PodSpawner) waitPodIP(ctx context.Context, podName string) (string, error) {
