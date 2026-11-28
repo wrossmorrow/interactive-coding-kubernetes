@@ -30,20 +30,22 @@ type PodSpawner struct {
 	replacing map[string]int    // sessionID -> number of Spawns mid delete->create replacement
 
 	// Polling tunables, overridable in unit tests.
-	exitPoll   time.Duration // watchExit poll interval
-	deleteWait time.Duration // waitDeleted deadline
+	exitPoll    time.Duration // watchExit poll interval
+	deleteWait  time.Duration // waitDeleted deadline
+	healthyWait time.Duration // waitPodHealthy deadline
 }
 
 // NewPodSpawner constructs a Kubernetes PodSpawner.
 func NewPodSpawner(client kubernetes.Interface, cfg PodConfig, onExit func(sessionID string)) *PodSpawner {
 	return &PodSpawner{
-		client:     client,
-		cfg:        cfg.WithDefaults(),
-		onExit:     onExit,
-		endpoints:  map[string]string{},
-		replacing:  map[string]int{},
-		exitPoll:   3 * time.Second,
-		deleteWait: 45 * time.Second,
+		client:      client,
+		cfg:         cfg.WithDefaults(),
+		onExit:      onExit,
+		endpoints:   map[string]string{},
+		replacing:   map[string]int{},
+		exitPoll:    3 * time.Second,
+		deleteWait:  45 * time.Second,
+		healthyWait: 60 * time.Second,
 	}
 }
 
@@ -110,14 +112,21 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 		if gerr == nil && existing.UID != "" && remaining.UID != "" && remaining.UID != existing.UID {
 			// A different pod generation now owns the name: an overlapping
 			// Spawn (there is no per-session spawn lock) has already created
-			// this session's replacement and owns its health check and exit
-			// watcher. Adopt its endpoint once it has an IP instead of
-			// failing on a healthy, already-replaced session.
+			// this session's replacement and owns its exit watcher. Adopt
+			// it: wait for its IP and, when health checks are enabled, verify
+			// the endpoint is healthy before returning success (the creator's
+			// own health gate may still fail and Stop the pod), instead of
+			// failing on an already-replaced session.
 			podIP, werr := p.waitPodIP(ctx, podName)
 			if werr != nil {
 				return "", fmt.Errorf("wait for replacement sandbox pod %s: %w", podName, werr)
 			}
 			endpoint := fmt.Sprintf("http://%s:%d", podIP, p.cfg.SessiondPort)
+			if !p.skipHealthCheck {
+				if err := waitPodHealthy(ctx, endpoint+"/api/health", p.healthyWait); err != nil {
+					return "", fmt.Errorf("replacement sandbox pod %s health check failed: %w", podName, err)
+				}
+			}
 			p.setEndpoint(spec.SessionID, endpoint)
 			return endpoint, nil
 		}
@@ -167,7 +176,7 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 	}
 	endpoint := fmt.Sprintf("http://%s:%d", podIP, p.cfg.SessiondPort)
 	if !p.skipHealthCheck {
-		if err := waitPodHealthy(ctx, endpoint+"/api/health"); err != nil {
+		if err := waitPodHealthy(ctx, endpoint+"/api/health", p.healthyWait); err != nil {
 			_ = p.Stop(context.Background(), spec.SessionID)
 			return "", fmt.Errorf("sandbox pod health check failed: %w", err)
 		}
@@ -194,16 +203,19 @@ func (p *PodSpawner) Endpoint(sessionID string) (string, bool) {
 	pod, err := p.client.CoreV1().Pods(p.cfg.Namespace).Get(ctx, PodName(sessionID), metav1.GetOptions{})
 	switch {
 	case apierrors.IsNotFound(err):
-		// Pod is gone; drop any stale cached endpoint.
+		// Pod is gone; drop any stale cached endpoint (only if it is still
+		// the one we read: a concurrent Spawn may have installed a fresh
+		// endpoint after our Get).
 		if cached != "" {
-			p.clearEndpoint(sessionID)
+			p.compareAndClearEndpoint(sessionID, cached)
 		}
 		return "", false
 	case err == nil && !podAgentRunning(pod):
 		// Agent terminated or pod leaving: drop the stale cached entry
-		// before watchExit's next tick would clear it.
+		// before watchExit's next tick would clear it (same freshness
+		// guard as the NotFound case).
 		if cached != "" {
-			p.clearEndpoint(sessionID)
+			p.compareAndClearEndpoint(sessionID, cached)
 		}
 		return "", false
 	case err == nil:
@@ -305,6 +317,18 @@ func (p *PodSpawner) setEndpoint(sessionID, ep string) {
 func (p *PodSpawner) clearEndpoint(sessionID string) {
 	p.mu.Lock()
 	delete(p.endpoints, sessionID)
+	p.mu.Unlock()
+}
+
+// compareAndClearEndpoint drops the cached endpoint for sessionID only if it
+// still equals stale. Endpoint captures the cached value before its live Get,
+// and a concurrent Spawn may install a fresh endpoint in between; a fresh
+// entry must survive an invalidation triggered by the older Get.
+func (p *PodSpawner) compareAndClearEndpoint(sessionID, stale string) {
+	p.mu.Lock()
+	if p.endpoints[sessionID] == stale {
+		delete(p.endpoints, sessionID)
+	}
 	p.mu.Unlock()
 }
 
@@ -465,9 +489,9 @@ func podAgentRunning(pod *corev1.Pod) bool {
 	return pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" && !podAgentTerminated(pod)
 }
 
-func waitPodHealthy(ctx context.Context, url string) error {
+func waitPodHealthy(ctx context.Context, url string, timeout time.Duration) error {
 	client := &http.Client{Timeout: 1 * time.Second}
-	deadline := time.NewTimer(60 * time.Second)
+	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()

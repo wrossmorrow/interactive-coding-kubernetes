@@ -512,6 +512,100 @@ func TestSpawnFailsClearlyWhenDeletionCannotBeConfirmed(t *testing.T) {
 	}
 }
 
+func TestCompareAndClearEndpointKeepsFreshEntry(t *testing.T) {
+	spawner := NewPodSpawner(fake.NewSimpleClientset(), PodConfig{Namespace: "interactive-sessions"}.WithDefaults(), nil)
+
+	// A stale cached value matching the current entry is cleared...
+	spawner.setEndpoint("s1", "http://10.42.0.1:8787")
+	spawner.compareAndClearEndpoint("s1", "http://10.42.0.1:8787")
+	spawner.mu.RLock()
+	_, stillThere := spawner.endpoints["s1"]
+	spawner.mu.RUnlock()
+	if stillThere {
+		t.Fatal("stale endpoint not cleared")
+	}
+
+	// ...but a concurrent Spawn's fresh entry must survive an invalidation
+	// triggered by an older Get that captured the previous value.
+	spawner.setEndpoint("s2", "http://10.42.0.2:8787")
+	spawner.compareAndClearEndpoint("s2", "http://10.42.0.1:8787")
+	spawner.mu.RLock()
+	fresh := spawner.endpoints["s2"]
+	spawner.mu.RUnlock()
+	if fresh != "http://10.42.0.2:8787" {
+		t.Fatalf("fresh endpoint = %q, want http://10.42.0.2:8787 kept", fresh)
+	}
+}
+
+func TestSpawnAdoptFailsWhenReplacementUnhealthy(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
+	tracker := cs.Tracker()
+	// As with the adopt-success test, a new-generation pod takes the name
+	// when the stale one is deleted — but its PodIP is unreachable, so the
+	// adopt path's health check must fail the adopt instead of returning a
+	// dead endpoint as success.
+	cs.PrependReactor("delete", "pods", func(action fstesting.Action) (bool, runtime.Object, error) {
+		del := action.(fstesting.DeleteAction)
+		podsGVR := corev1.SchemeGroupVersion.WithResource("pods")
+		_ = tracker.Delete(podsGVR, cfg.Namespace, del.GetName())
+		concurrent := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: del.GetName(), Namespace: cfg.Namespace, UID: types.UID("uid-new-gen")},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.42.0.200",
+				ContainerStatuses: []corev1.ContainerStatus{
+					{Name: "agent", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+				},
+			},
+		}
+		_ = tracker.Add(concurrent)
+		return true, nil, nil
+	})
+	spawner := NewPodSpawner(cs, cfg, nil)
+	spawner.deleteWait = 500 * time.Millisecond
+	spawner.healthyWait = 500 * time.Millisecond
+	// Health checks enabled (skipHealthCheck stays false).
+
+	spec := hub.SpawnSpec{
+		SessionID:   "sess-unhealthy-adopt",
+		SessionKind: sessions.KindInteractive,
+		Toolchain:   "golang",
+		HubURL:      "http://session-hub.session-system.svc.cluster.local:8787",
+		HubToken:    "tok-unhealthy-adopt",
+	}
+	stalePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: PodName(spec.SessionID), Namespace: cfg.Namespace, UID: types.UID("uid-old")},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.42.0.77",
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "agent", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+			},
+		},
+	}
+	if _, err := cs.CoreV1().Pods(cfg.Namespace).Create(context.Background(), stalePod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create stale pod: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := spawner.Spawn(ctx, spec); err == nil {
+		t.Fatal("Spawn adopted an unhealthy replacement pod, want a health check error")
+	} else if !strings.Contains(err.Error(), "health check failed") {
+		t.Fatalf("error = %q, want a replacement health check failure", err)
+	}
+	// The concurrent pod must not be deleted by the failed adopt (it is not
+	// ours to Stop); the creator Spawn owns its lifecycle.
+	got, err := cs.CoreV1().Pods(cfg.Namespace).Get(ctx, PodName(spec.SessionID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get replacement pod: %v", err)
+	}
+	if got.UID != "uid-new-gen" {
+		t.Fatalf("pod UID = %q, want uid-new-gen (failed adopt must not Stop the pod)", got.UID)
+	}
+}
+
 func TestReplacingMarkRefcountsOverlappingSpawns(t *testing.T) {
 	spawner := NewPodSpawner(fake.NewSimpleClientset(), PodConfig{Namespace: "interactive-sessions"}.WithDefaults(), nil)
 	sessionID := "sess-refcount"
