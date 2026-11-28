@@ -1,0 +1,54 @@
+name: Draft Release Notes
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to draft notes for (e.g. v0.0.7)
+        required: true
+        type: string
+
+# GITHUB_TOKEN only needs read for checkout; the `release-bot` GitHub App
+# mounted via github-auth mints the `Contents: Read & write` token for drafts.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-notes-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  draft-release:
+    runs-on: interactive-coding-kubernetes-release
+    timeout-minutes: 15
+    steps:
+      - id: validate
+        env:
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if [[ ! "${RAW_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid release tag format: ${RAW_TAG}"
+            exit 1
+          fi
+          echo "tag=${RAW_TAG}" >> "${GITHUB_OUTPUT}"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ steps.validate.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: wrossmorrow/github-agent-runner/action@v0.0.13
+        with:
+          instructions: |
+            Inspect the commits and actual code diff between the previous release tag
+            and ${{ steps.validate.outputs.tag }}, and draft clean Markdown release notes
+            grouped into Highlights, Features, Bug Fixes, and Docs/CI. Verify every
+            referenced Helm value, CLI flag, HTTP endpoint, and UI control against
+            the actual repository state at ${{ steps.validate.outputs.tag }}.
+          fail-on: none
+          output: release-draft
+          tag: ${{ steps.validate.outputs.tag }}
