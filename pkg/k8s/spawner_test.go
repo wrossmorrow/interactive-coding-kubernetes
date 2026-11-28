@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -376,6 +377,135 @@ func TestSpawnFailsClearlyWhenStalePodSurvivesForceDelete(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "still exists after force-delete") {
 		t.Fatalf("error = %q, want a clear force-delete message", err)
+	}
+	if spawner.isReplacing(spec.SessionID) {
+		t.Fatal("replacement mark leaked after failed Spawn")
+	}
+}
+
+func TestSpawnAdoptsConcurrentReplacementPod(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
+	tracker := cs.Tracker()
+	// Deterministic stand-in for an overlapping Spawn (no per-session spawn
+	// lock): as soon as the stale pod is force-deleted, a new-generation
+	// pod (new UID, live agent) takes the same name.
+	cs.PrependReactor("delete", "pods", func(action fstesting.Action) (bool, runtime.Object, error) {
+		del := action.(fstesting.DeleteAction)
+		podsGVR := corev1.SchemeGroupVersion.WithResource("pods")
+		_ = tracker.Delete(podsGVR, cfg.Namespace, del.GetName())
+		concurrent := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: del.GetName(), Namespace: cfg.Namespace, UID: types.UID("uid-new-gen")},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.42.0.200",
+				ContainerStatuses: []corev1.ContainerStatus{
+					{Name: "agent", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+				},
+			},
+		}
+		_ = tracker.Add(concurrent)
+		return true, nil, nil
+	})
+	spawner := NewPodSpawner(cs, cfg, nil)
+	spawner.skipHealthCheck = true
+	spawner.deleteWait = 500 * time.Millisecond
+
+	spec := hub.SpawnSpec{
+		SessionID:   "sess-concurrent-replace",
+		SessionKind: sessions.KindInteractive,
+		Toolchain:   "golang",
+		HubURL:      "http://session-hub.session-system.svc.cluster.local:8787",
+		HubToken:    "tok-concurrent",
+	}
+	stalePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: PodName(spec.SessionID), Namespace: cfg.Namespace, UID: types.UID("uid-old")},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.42.0.77",
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "agent", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+			},
+		},
+	}
+	if _, err := cs.CoreV1().Pods(cfg.Namespace).Create(context.Background(), stalePod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create stale pod: %v", err)
+	}
+
+	// The concurrent replacement pod is still up when waitDeleted's deadline
+	// expires; Spawn must adopt it instead of failing with a stale-pod error.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ep, err := spawner.Spawn(ctx, spec)
+	if err != nil {
+		t.Fatalf("Spawn with concurrent replacement pod failed: %v", err)
+	}
+	if ep != "http://10.42.0.200:8787" {
+		t.Fatalf("endpoint = %q, want adopted http://10.42.0.200:8787", ep)
+	}
+	// The concurrent-generation pod must survive, not be replaced again.
+	got, err := cs.CoreV1().Pods(cfg.Namespace).Get(ctx, PodName(spec.SessionID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get replacement pod: %v", err)
+	}
+	if got.UID != "uid-new-gen" {
+		t.Fatalf("pod UID = %q, want adopted uid-new-gen", got.UID)
+	}
+	if spawner.isReplacing(spec.SessionID) {
+		t.Fatal("replacement mark leaked after adopting concurrent pod")
+	}
+}
+
+func TestSpawnFailsClearlyWhenDeletionCannotBeConfirmed(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	// Deletions are acked but do not remove the pod, and every pod Get after
+	// the preflight and existing-pod lookups fails with a transient API
+	// error: waitDeleted polls into the deadline, and the confirmation
+	// re-Get must surface the API error instead of falling through to a
+	// Create that could hit AlreadyExists.
+	cs.PrependReactor("delete", "pods", func(action fstesting.Action) (bool, runtime.Object, error) {
+		return true, nil, nil
+	})
+	gets := 0
+	cs.PrependReactor("get", "pods", func(action fstesting.Action) (bool, runtime.Object, error) {
+		gets++
+		if gets > 2 {
+			return true, nil, fmt.Errorf("api server unavailable")
+		}
+		return false, nil, nil
+	})
+	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
+	spawner := NewPodSpawner(cs, cfg, nil)
+	spawner.skipHealthCheck = true
+	spawner.deleteWait = 300 * time.Millisecond
+
+	spec := hub.SpawnSpec{
+		SessionID:   "sess-unconfirmed-delete",
+		SessionKind: sessions.KindInteractive,
+		Toolchain:   "golang",
+		HubURL:      "http://session-hub.session-system.svc.cluster.local:8787",
+		HubToken:    "tok-unconfirmed",
+	}
+	stalePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: PodName(spec.SessionID), Namespace: cfg.Namespace, UID: types.UID("uid-stuck")},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.42.0.77",
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "agent", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+			},
+		},
+	}
+	if _, err := cs.CoreV1().Pods(cfg.Namespace).Create(context.Background(), stalePod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create stale pod: %v", err)
+	}
+
+	_, err := spawner.Spawn(context.Background(), spec)
+	if err == nil {
+		t.Fatal("Spawn succeeded, want a clear error when the deletion cannot be confirmed")
+	}
+	if !strings.Contains(err.Error(), "confirm deletion of stale sandbox pod") {
+		t.Fatalf("error = %q, want a clear deletion-confirmation message", err)
 	}
 	if spawner.isReplacing(spec.SessionID) {
 		t.Fatal("replacement mark leaked after failed Spawn")

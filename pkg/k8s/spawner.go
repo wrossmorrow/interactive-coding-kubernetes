@@ -103,11 +103,34 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 			log.Printf("force-delete stale sandbox pod %s: %v", podName, derr)
 		}
 		p.waitDeleted(ctx, podName)
-		// waitDeleted is a bounded best-effort wait; if the old pod still
-		// holds the name, fail with a clear cause instead of a confusing
-		// AlreadyExists from the Create below.
-		if remaining, gerr := p.client.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{}); gerr == nil {
+
+		// waitDeleted is a bounded best-effort wait; confirm the name is
+		// actually released before creating the replacement.
+		remaining, gerr := p.client.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{})
+		if gerr == nil && existing.UID != "" && remaining.UID != "" && remaining.UID != existing.UID {
+			// A different pod generation now owns the name: an overlapping
+			// Spawn (there is no per-session spawn lock) has already created
+			// this session's replacement and owns its health check and exit
+			// watcher. Adopt its endpoint once it has an IP instead of
+			// failing on a healthy, already-replaced session.
+			podIP, werr := p.waitPodIP(ctx, podName)
+			if werr != nil {
+				return "", fmt.Errorf("wait for replacement sandbox pod %s: %w", podName, werr)
+			}
+			endpoint := fmt.Sprintf("http://%s:%d", podIP, p.cfg.SessiondPort)
+			p.setEndpoint(spec.SessionID, endpoint)
+			return endpoint, nil
+		}
+		if gerr == nil {
+			// The stale pod survived the force-delete (stuck finalizer, slow
+			// sidecar teardown); fail with a clear cause instead of an opaque
+			// AlreadyExists from the Create below.
 			return "", fmt.Errorf("stale sandbox pod %s (phase %s) still exists after force-delete; retry once the deletion completes", podName, remaining.Status.Phase)
+		}
+		if !apierrors.IsNotFound(gerr) {
+			// Transient API error: the pod may still hold the name, so do not
+			// fall through to the Create that would race AlreadyExists.
+			return "", fmt.Errorf("confirm deletion of stale sandbox pod %s: %w", podName, gerr)
 		}
 	}
 
