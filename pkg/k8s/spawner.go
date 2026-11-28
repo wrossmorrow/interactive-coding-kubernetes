@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/wrossmorrow/k8s-agents/pkg/hub"
@@ -26,15 +27,25 @@ type PodSpawner struct {
 
 	mu        sync.RWMutex
 	endpoints map[string]string // sessionID -> http://<podIP>:<port>
+	replacing map[string]int    // sessionID -> number of Spawns mid delete->create replacement
+
+	// Polling tunables, overridable in unit tests.
+	exitPoll    time.Duration // watchExit poll interval
+	deleteWait  time.Duration // waitDeleted deadline
+	healthyWait time.Duration // waitPodHealthy deadline
 }
 
 // NewPodSpawner constructs a Kubernetes PodSpawner.
 func NewPodSpawner(client kubernetes.Interface, cfg PodConfig, onExit func(sessionID string)) *PodSpawner {
 	return &PodSpawner{
-		client:    client,
-		cfg:       cfg.WithDefaults(),
-		onExit:    onExit,
-		endpoints: map[string]string{},
+		client:      client,
+		cfg:         cfg.WithDefaults(),
+		onExit:      onExit,
+		endpoints:   map[string]string{},
+		replacing:   map[string]int{},
+		exitPoll:    3 * time.Second,
+		deleteWait:  45 * time.Second,
+		healthyWait: 60 * time.Second,
 	}
 }
 
@@ -61,6 +72,14 @@ func (p *PodSpawner) ensureNamespacePolicies(ctx context.Context, hubURL string)
 }
 
 func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, error) {
+	// Mute the old pod generation's watchExit for the entire Spawn: it
+	// would otherwise report the terminated pod's exit mid-replacement
+	// (spurious pause broadcast, token revocation), and the mute must
+	// cover the preflight, delete, and create phases alike. Refcounted so
+	// overlapping Spawns for the same session cannot lift it early.
+	p.markReplacing(spec.SessionID)
+	defer p.unmarkReplacing(spec.SessionID)
+
 	if ep, ok := p.Endpoint(spec.SessionID); ok {
 		return ep, nil
 	}
@@ -71,30 +90,102 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 	ns := p.cfg.Namespace
 	podName := PodName(spec.SessionID)
 
-	// Clean up any prior completed/failed Pod (including Pods whose agent
-	// container terminated while a native sidecar is still shutting down).
+	// Clean up any prior Pod that is not actively running (completed/failed,
+	// or a Running pod whose agent container terminated while a native
+	// sidecar is still shutting down). The agent is already dead in both
+	// cases, so force-delete to release the pod name quickly; waitDeleted is
+	// a best-effort bound below.
 	if existing, err := p.client.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{}); err == nil {
 		if podAgentRunning(existing) {
 			ep := fmt.Sprintf("http://%s:%d", existing.Status.PodIP, p.cfg.SessiondPort)
 			p.setEndpoint(spec.SessionID, ep)
 			return ep, nil
 		}
-		_ = p.client.CoreV1().Pods(ns).Delete(ctx, podName, metav1.DeleteOptions{})
-		p.waitDeleted(ctx, podName)
+
+		graceZero := int64(0)
+		if derr := p.client.CoreV1().Pods(ns).Delete(ctx, podName, metav1.DeleteOptions{GracePeriodSeconds: &graceZero}); derr != nil && !apierrors.IsNotFound(derr) {
+			log.Printf("force-delete stale sandbox pod %s: %v", podName, derr)
+		}
+		p.waitDeleted(ctx, podName, existing.UID)
+
+		// waitDeleted is a bounded best-effort wait; confirm the name is
+		// actually released before creating the replacement.
+		remaining, gerr := p.client.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{})
+		if gerr == nil && existing.UID != "" && remaining.UID != "" && remaining.UID != existing.UID {
+			// A different pod generation now owns the name: an overlapping
+			// Spawn (there is no per-session spawn lock) has already created
+			// this session's replacement.
+			return p.adoptExistingPod(ctx, spec, podName)
+		}
+		if gerr == nil {
+			// The stale pod survived the force-delete (stuck finalizer, slow
+			// sidecar teardown); fail with a clear cause instead of an opaque
+			// AlreadyExists from the Create below.
+			return "", fmt.Errorf("stale sandbox pod %s (phase %s) still exists after force-delete; retry once the deletion completes", podName, remaining.Status.Phase)
+		}
+		if !apierrors.IsNotFound(gerr) {
+			// Transient API error: the pod may still hold the name, so do not
+			// fall through to the Create that would race AlreadyExists.
+			return "", fmt.Errorf("confirm deletion of stale sandbox pod %s: %w", podName, gerr)
+		}
 	}
 
 	// Create or replace the per-session scoped bearer token Secret.
 	sec := BuildTokenSecret(ns, spec.SessionID, spec.SessionKind, spec.HubToken, spec.AnalystToken)
 	_ = p.client.CoreV1().Secrets(ns).Delete(ctx, sec.Name, metav1.DeleteOptions{})
 	createdSec, err := p.client.CoreV1().Secrets(ns).Create(ctx, sec, metav1.CreateOptions{})
+	createdByUs := true
 	if err != nil {
-		return "", fmt.Errorf("create session token secret: %w", err)
+		if apierrors.IsAlreadyExists(err) {
+			// A concurrent Spawn (re)created the secret between our Delete
+			// and Create. Reuse it rather than failing the Spawn: the pod
+			// (ours or the concurrent one adopted below) reads whatever
+			// token the secret holds at container start, so aborting here
+			// would report a healthy session as failed.
+			createdSec, err = p.client.CoreV1().Secrets(ns).Get(ctx, sec.Name, metav1.GetOptions{})
+			if err != nil {
+				return "", fmt.Errorf("read concurrent session token secret: %w", err)
+			}
+			createdByUs = false
+		} else {
+			return "", fmt.Errorf("create session token secret: %w", err)
+		}
 	}
 
 	pod := BuildSandboxPod(p.cfg, spec)
 	createdPod, err := p.client.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
-		_ = p.client.CoreV1().Secrets(ns).Delete(context.Background(), sec.Name, metav1.DeleteOptions{})
+		if apierrors.IsAlreadyExists(err) {
+			// A concurrent Spawn created the replacement between our
+			// confirmation Get and this Create; adopt it rather than
+			// failing on a healthy, already-replaced session.
+			ep, aerr := p.adoptExistingPod(ctx, spec, podName)
+			// The token secret we (re)created above is shared session
+			// state, and our Delete+Create may have lost the creator's
+			// owner-ref binding, so re-bind it to the pod that holds the
+			// name for GC (on a failed adopt the pod may still be alive
+			// and be Stopped by its creator, at which point the secret
+			// must go with it). Never delete the secret on a failed
+			// adopt: the pod may still be alive and authenticates against
+			// it.
+			if adopted, gerr := p.client.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{}); gerr == nil {
+				createdSec.OwnerReferences = []metav1.OwnerReference{
+					{APIVersion: "v1", Kind: "Pod", Name: adopted.Name, UID: adopted.UID},
+				}
+				_, _ = p.client.CoreV1().Secrets(ns).Update(ctx, createdSec, metav1.UpdateOptions{})
+			}
+			if aerr != nil {
+				return "", aerr
+			}
+			return ep, nil
+		}
+		// Only clean up a secret this Spawn created: if the Create was
+		// served by the reuse branch above, the secret belongs to the
+		// concurrent Spawn (and may be bound to its healthy pod), so
+		// deleting it here would brick its bearer auth.
+		if createdByUs {
+			_ = p.client.CoreV1().Secrets(ns).Delete(context.Background(), sec.Name, metav1.DeleteOptions{})
+		}
 		return "", fmt.Errorf("create sandbox pod: %w", err)
 	}
 
@@ -116,36 +207,78 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 	}
 	endpoint := fmt.Sprintf("http://%s:%d", podIP, p.cfg.SessiondPort)
 	if !p.skipHealthCheck {
-		if err := waitPodHealthy(ctx, endpoint+"/api/health"); err != nil {
+		if err := waitPodHealthy(ctx, endpoint+"/api/health", p.healthyWait); err != nil {
 			_ = p.Stop(context.Background(), spec.SessionID)
 			return "", fmt.Errorf("sandbox pod health check failed: %w", err)
 		}
 	}
 
 	p.setEndpoint(spec.SessionID, endpoint)
-	go p.watchExit(spec.SessionID, podName)
+	go p.watchExit(spec.SessionID, podName, createdPod.UID)
+	return endpoint, nil
+}
+
+// adoptExistingPod takes over the endpoint for the pod that already occupies
+// podName because an overlapping Spawn created it. It waits for the pod to
+// have an IP and, when health checks are enabled, verifies the endpoint is
+// healthy before caching and returning it, instead of failing on an
+// already-replaced session. It deliberately does not stop the pod or start a
+// watcher: the creator Spawn owns the pod's lifecycle and its exit watcher.
+func (p *PodSpawner) adoptExistingPod(ctx context.Context, spec hub.SpawnSpec, podName string) (string, error) {
+	podIP, err := p.waitPodIP(ctx, podName)
+	if err != nil {
+		return "", fmt.Errorf("wait for replacement sandbox pod %s: %w", podName, err)
+	}
+	endpoint := fmt.Sprintf("http://%s:%d", podIP, p.cfg.SessiondPort)
+	if !p.skipHealthCheck {
+		if err := waitPodHealthy(ctx, endpoint+"/api/health", p.healthyWait); err != nil {
+			return "", fmt.Errorf("replacement sandbox pod %s health check failed: %w", podName, err)
+		}
+	}
+	p.setEndpoint(spec.SessionID, endpoint)
 	return endpoint, nil
 }
 
 func (p *PodSpawner) Endpoint(sessionID string) (string, bool) {
+	var cached string
 	p.mu.RLock()
-	ep, ok := p.endpoints[sessionID]
-	p.mu.RUnlock()
-	if ok {
-		return ep, true
+	if ep, ok := p.endpoints[sessionID]; ok {
+		cached = ep
 	}
-	// Fallback lookup in Kubernetes so session-hub restarts seamlessly
-	// rediscover already-running sandbox Pods.
+	p.mu.RUnlock()
+
+	// Verify against Kubernetes (also the fallback lookup path when no
+	// cached endpoint exists, so session-hub restarts seamlessly rediscover
+	// already-running sandbox Pods).
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	pod, err := p.client.CoreV1().Pods(p.cfg.Namespace).Get(ctx, PodName(sessionID), metav1.GetOptions{})
-	if err != nil {
+	switch {
+	case apierrors.IsNotFound(err):
+		// Pod is gone; drop any stale cached endpoint (only if it is still
+		// the one we read: a concurrent Spawn may have installed a fresh
+		// endpoint after our Get).
+		if cached != "" {
+			p.compareAndClearEndpoint(sessionID, cached)
+		}
 		return "", false
-	}
-	if podAgentRunning(pod) {
-		ep = fmt.Sprintf("http://%s:%d", pod.Status.PodIP, p.cfg.SessiondPort)
+	case err == nil && !podAgentRunning(pod):
+		// Agent terminated or pod leaving: drop the stale cached entry
+		// before watchExit's next tick would clear it (same freshness
+		// guard as the NotFound case).
+		if cached != "" {
+			p.compareAndClearEndpoint(sessionID, cached)
+		}
+		return "", false
+	case err == nil:
+		ep := fmt.Sprintf("http://%s:%d", pod.Status.PodIP, p.cfg.SessiondPort)
 		p.setEndpoint(sessionID, ep)
 		return ep, true
+	}
+	// Transient API error: keep returning the recently-validated cached
+	// endpoint if we have one.
+	if cached != "" {
+		return cached, true
 	}
 	return "", false
 }
@@ -239,6 +372,46 @@ func (p *PodSpawner) clearEndpoint(sessionID string) {
 	p.mu.Unlock()
 }
 
+// compareAndClearEndpoint drops the cached endpoint for sessionID only if it
+// still equals stale. Endpoint captures the cached value before its live Get,
+// and a concurrent Spawn may install a fresh endpoint in between; a fresh
+// entry must survive an invalidation triggered by the older Get.
+func (p *PodSpawner) compareAndClearEndpoint(sessionID, stale string) {
+	p.mu.Lock()
+	if p.endpoints[sessionID] == stale {
+		delete(p.endpoints, sessionID)
+	}
+	p.mu.Unlock()
+}
+
+// markReplacing, unmarkReplacing, and isReplacing refcount how many Spawn
+// calls are mid delete->create replacement for a session, so the old pod
+// generation's watchExit can distinguish an intentional replacement gap
+// from a real exit. The refcount matters because overlapping Spawns for the
+// same session have no per-session lock: one Spawn's deferred unmark must
+// not clear the mute while another Spawn is still in its gap.
+func (p *PodSpawner) markReplacing(sessionID string) {
+	p.mu.Lock()
+	p.replacing[sessionID]++
+	p.mu.Unlock()
+}
+
+func (p *PodSpawner) unmarkReplacing(sessionID string) {
+	p.mu.Lock()
+	if p.replacing[sessionID] > 1 {
+		p.replacing[sessionID]--
+	} else {
+		delete(p.replacing, sessionID)
+	}
+	p.mu.Unlock()
+}
+
+func (p *PodSpawner) isReplacing(sessionID string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.replacing[sessionID] > 0
+}
+
 func (p *PodSpawner) waitPodIP(ctx context.Context, podName string) (string, error) {
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
@@ -263,13 +436,24 @@ func (p *PodSpawner) waitPodIP(ctx context.Context, podName string) (string, err
 	}
 }
 
-func (p *PodSpawner) waitDeleted(ctx context.Context, podName string) {
-	deadline := time.NewTimer(15 * time.Second)
+func (p *PodSpawner) waitDeleted(ctx context.Context, podName string, staleUID types.UID) {
+	// Deadline runs past the default 30s pod termination grace period so a
+	// slow sidecar exit does not leave the pod name held when Spawn creates.
+	// It also returns early if a different pod generation occupies the name
+	// before the stale one disappears (an overlapping Spawn already created
+	// the replacement): waiting for NotFound would run to the full deadline
+	// for no reason, and the caller's confirmation Get handles the new
+	// generation.
+	deadline := time.NewTimer(p.deleteWait)
 	defer deadline.Stop()
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		if _, err := p.client.CoreV1().Pods(p.cfg.Namespace).Get(ctx, podName, metav1.GetOptions{}); apierrors.IsNotFound(err) {
+		pod, err := p.client.CoreV1().Pods(p.cfg.Namespace).Get(ctx, podName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		if err == nil && staleUID != "" && pod.UID != "" && pod.UID != staleUID {
 			return
 		}
 		select {
@@ -282,23 +466,60 @@ func (p *PodSpawner) waitDeleted(ctx context.Context, podName string) {
 	}
 }
 
-func (p *PodSpawner) watchExit(sessionID, podName string) {
-	tick := time.NewTicker(3 * time.Second)
+// watchExit polls the sandbox pod until the agent container exits or the pod
+// is deleted, then clears the endpoint and notifies onExit. It only reacts
+// to the pod generation it was started for (podUID): if Spawn has replaced
+// the pod, the name belongs to a new generation with its own watcher, and
+// this stale watcher stops silently.
+func (p *PodSpawner) watchExit(sessionID, podName string, podUID types.UID) {
+	missing := 0
+	tick := time.NewTicker(p.exitPoll)
 	defer tick.Stop()
 	for range tick.C {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		pod, err := p.client.CoreV1().Pods(p.cfg.Namespace).Get(ctx, podName, metav1.GetOptions{})
 		cancel()
-		if apierrors.IsNotFound(err) || (err == nil && podAgentTerminated(pod)) {
+		if err == nil {
+			if pod.UID != "" && podUID != "" && pod.UID != podUID {
+				// Pod name is now owned by a new generation; the new watcher
+				// owns exit handling for this session.
+				return
+			}
+			missing = 0
+			if p.isReplacing(sessionID) {
+				// A replacement is in flight for this session; the new
+				// generation gets its own watcher on success, so stay silent
+				// instead of reporting the old generation's exit.
+				continue
+			}
+			if podAgentTerminated(pod) {
+				p.clearEndpoint(sessionID)
+				if p.onExit != nil {
+					p.onExit(sessionID)
+				}
+				return
+			}
+			continue
+		}
+		if apierrors.IsNotFound(err) {
+			// The pod may be in the delete->create gap of a replacement by
+			// Spawn, which can outlast the debounce below under API latency.
+			if p.isReplacing(sessionID) {
+				missing = 0
+				continue
+			}
+			// Confirm on the next tick.
+			missing++
+			if missing < 2 {
+				continue
+			}
 			p.clearEndpoint(sessionID)
 			if p.onExit != nil {
 				p.onExit(sessionID)
 			}
 			return
 		}
-		if err != nil {
-			log.Printf("watch sandbox pod %s: %v", podName, err)
-		}
+		log.Printf("watch sandbox pod %s: %v", podName, err)
 	}
 }
 
@@ -329,9 +550,9 @@ func podAgentRunning(pod *corev1.Pod) bool {
 	return pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" && !podAgentTerminated(pod)
 }
 
-func waitPodHealthy(ctx context.Context, url string) error {
+func waitPodHealthy(ctx context.Context, url string, timeout time.Duration) error {
 	client := &http.Client{Timeout: 1 * time.Second}
-	deadline := time.NewTimer(60 * time.Second)
+	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()

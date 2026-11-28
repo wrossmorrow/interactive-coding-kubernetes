@@ -143,6 +143,29 @@ func (m *TokenManager) Verify(sessionID, token string) bool {
 	return subtle.ConstantTimeCompare([]byte(want), []byte(token)) == 1
 }
 
+// Reconcile syncs the in-memory token for sessionID to whatever the durable
+// lookup (e.g. the per-session Kubernetes Secret) currently holds, so that
+// after a concurrent Spawn reused or re-created the shared token secret,
+// the hub verifies against the token the sandbox pod was actually started
+// with. It returns false when no durable lookup is configured or holds a
+// token.
+func (m *TokenManager) Reconcile(sessionID string) bool {
+	m.mu.RLock()
+	lookup := m.lookup
+	m.mu.RUnlock()
+	if lookup == nil {
+		return false
+	}
+	recovered, found := lookup(sessionID)
+	if !found || recovered == "" {
+		return false
+	}
+	m.mu.Lock()
+	m.tokens[sessionID] = recovered
+	m.mu.Unlock()
+	return true
+}
+
 // Revoke removes the active tokens for sessionID.
 func (m *TokenManager) Revoke(sessionID string) {
 	m.mu.Lock()
