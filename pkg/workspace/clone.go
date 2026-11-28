@@ -27,8 +27,13 @@ func EnsureCloned(ctx context.Context, dir, repo, branch string) error {
 	}
 
 	if ghPath, err := exec.LookPath("gh"); err == nil {
-		// Configure git to use gh's credential helper (which delegates to /tokens/token).
-		_ = exec.CommandContext(ctx, ghPath, "auth", "setup-git").Run()
+		// Configure git to invoke the gh wrapper on PATH (e.g. /usr/local/bin/gh)
+		// rather than `gh auth setup-git`, which resolves os.Executable() to
+		// /usr/local/lib/gh/gh and bypasses the /tokens/token shim.
+		helper := "!" + ghPath + " auth git-credential"
+		_ = exec.CommandContext(ctx, "git", "config", "--global", "--unset-all", "credential.https://github.com.helper").Run()
+		_ = exec.CommandContext(ctx, "git", "config", "--global", "--add", "credential.https://github.com.helper", "").Run()
+		_ = exec.CommandContext(ctx, "git", "config", "--global", "--add", "credential.https://github.com.helper", helper).Run()
 		cmd := exec.CommandContext(ctx, ghPath, "repo", "clone", repo, dir)
 		if out, cerr := cmd.CombinedOutput(); cerr != nil {
 			return fmt.Errorf("gh repo clone %s: %w: %s", repo, cerr, strings.TrimSpace(string(out)))

@@ -44,6 +44,7 @@ var DefaultEgressAllowlist = []string{
 	".githubusercontent.com",
 	"proxy.golang.org",
 	"sum.golang.org",
+	"storage.googleapis.com", // proxy.golang.org redirects module zip downloads here
 	"pypi.org",
 	"files.pythonhosted.org",
 	"crates.io",
