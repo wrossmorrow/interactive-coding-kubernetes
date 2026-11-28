@@ -801,6 +801,7 @@ function paintSidebar() {
   const metaRow = $("#sb-filter-meta");
   metaRow.hidden = !active;
   if (active) $("#sb-count").textContent = `${items.length} / ${all.length}`;
+  else $("#sb-count").textContent = "";
   if (!items.length) {
     list.append(el("div", "dim", active ? "No sessions match the current filters." : "No sessions yet. Click + new."));
     return;

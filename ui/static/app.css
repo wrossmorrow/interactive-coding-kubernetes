@@ -138,6 +138,7 @@ button, input, select { font: inherit; color: inherit; }
 }
 .sb-filter-row select:focus { border-color: var(--borderAccent); }
 #sb-filter-meta { font-size: 11.5px; }
+#sb-filter-meta[hidden] { display: none; }
 #sb-filter-meta .grow { flex: 1; }
 
 .badge {
