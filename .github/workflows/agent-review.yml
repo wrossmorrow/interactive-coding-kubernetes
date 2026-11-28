@@ -51,20 +51,32 @@ jobs:
         with:
           instructions: |
             Review the PR diff against ${{ github.base_ref }}.
-            Deterministic checks (gofmt, go vet, go test -race, helm lint, actionlint, CRD diff)
+            Deterministic checks (gofmt, go vet, go test -race, helm lint, actionlint)
             already run in CI—do NOT spend turns repeating style or formatting nits.
 
-            Focus on:
-            1. Security & isolation boundaries: ensure secrets/tokens never leak into the stock
-               `runner` container, and RBAC, NetworkPolicy, Squid allowlists, and CRD validation
-               remain least-privilege.
-            2. Cross-layer consistency: if CRD types, controller behavior, or action inputs change,
-               check that validation, pkg/render, config/crd schemas, Helm chart templates/schema,
-               and docs stay consistent.
-            3. Reliability & edge cases: look for subtle bugs in controller reconciliation, RPC/process
-               lifecycle, error handling, or missing unit tests for new behavior.
+            Focus strictly on HIGH-SIGNAL issues:
+            1. Security & isolation boundaries:
+               - Ensure secrets, ambient tokens (GITHUB_TOKEN, GH_TOKEN, APP keys), and cloud credentials
+                 never leak into sandbox pods or local subprocesses (verify local-vs-k8s parity).
+               - Verify RBAC roles, ServiceAccount verbs (e.g. list/get distinctions), NetworkPolicies,
+                 and Squid allowlists remain least-privilege and sufficient for all code paths.
+            2. Concurrency, state drift & race conditions:
+               - Look for TOCTOU races, uncoordinated store-vs-daemon flushes, cache invalidation bugs
+                 (such as conditional ETag advancing before successful execution), and UI state machine deadlocks.
+            3. Cross-layer consistency & critical runtime bugs:
+               - Byte slicing / UTF-8 indexing panics, unhandled error drops in hub/daemon/spawner paths,
+                 or broken invariants across Go packages, UI, and the Helm chart.
 
-            Only emit `error` severity for concrete bugs, security regressions, or broken invariants.
+            Do NOT report:
+            - Missing unit tests or test coverage gaps unless an essential security invariant is completely untested.
+            - Missing documentation in README.md or values.yaml comments.
+            - Theoretical input sanitization nits (e.g. negative numbers, cosmetic validation) unless externally exploitable.
+
+            Severity rules:
+            - `error`: Only for concrete logic bugs, runtime panics, RBAC permission errors, or security/token leaks.
+            - `warning`: Plausible race conditions or state-loss edges that can occur in normal operation.
+            - Do NOT emit `info`-level findings for documentation, style, or hypothetical future improvements.
+
             For small, locally verified fixes inside a single diff hunk, you may include a
             "suggestion" (and optional "startLine" < "line") on the inline comment.
           fail-on: error
