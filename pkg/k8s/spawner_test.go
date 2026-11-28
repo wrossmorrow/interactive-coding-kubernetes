@@ -9,6 +9,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -603,6 +604,130 @@ func TestSpawnAdoptFailsWhenReplacementUnhealthy(t *testing.T) {
 	}
 	if got.UID != "uid-new-gen" {
 		t.Fatalf("pod UID = %q, want uid-new-gen (failed adopt must not Stop the pod)", got.UID)
+	}
+}
+
+func TestSpawnMutesWatcherForEntireCall(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
+	// Slow the token secret Create so Spawn stays in flight (past the
+	// preflight Get and past any stale-pod cleanup) while the test
+	// observes the replacement mute — the mute must cover the whole call,
+	// not just the delete->create gap.
+	cs.PrependReactor("create", "secrets", func(action fstesting.Action) (bool, runtime.Object, error) {
+		time.Sleep(300 * time.Millisecond)
+		return false, nil, nil
+	})
+	spawner := NewPodSpawner(cs, cfg, nil)
+	spawner.skipHealthCheck = true
+
+	spec := hub.SpawnSpec{
+		SessionID:   "sess-mute-window",
+		SessionKind: sessions.KindInteractive,
+		Toolchain:   "golang",
+		HubURL:      "http://session-hub.session-system.svc.cluster.local:8787",
+		HubToken:    "tok-mute-window",
+	}
+
+	// Simulate kubelet assigning the fresh pod an IP.
+	go func() {
+		for i := 0; i < 100; i++ {
+			time.Sleep(20 * time.Millisecond)
+			pod, err := cs.CoreV1().Pods(cfg.Namespace).Get(context.Background(), PodName(spec.SessionID), metav1.GetOptions{})
+			if err != nil || pod.Status.Phase != "" {
+				continue
+			}
+			pod.Status.Phase = corev1.PodRunning
+			pod.Status.PodIP = "10.42.0.60"
+			_, _ = cs.CoreV1().Pods(cfg.Namespace).UpdateStatus(context.Background(), pod, metav1.UpdateOptions{})
+			return
+		}
+	}()
+
+	done := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() {
+		defer close(done)
+		_, _ = spawner.Spawn(ctx, spec)
+	}()
+
+	// While Spawn is in flight (blocked in the slow secret Create), the
+	// old generation's watcher must already be muted.
+	time.Sleep(100 * time.Millisecond)
+	if !spawner.isReplacing(spec.SessionID) {
+		t.Fatal("replacement mute not held for the whole Spawn (not set during the in-flight call)")
+	}
+	<-done
+	if spawner.isReplacing(spec.SessionID) {
+		t.Fatal("replacement mark leaked after Spawn returned")
+	}
+}
+
+func TestSpawnAdoptsConcurrentPodOnCreateAlreadyExists(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
+	stalePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: PodName("sess-create-aex"), Namespace: cfg.Namespace, UID: types.UID("uid-old")},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.42.0.77",
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "agent", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+			},
+		},
+	}
+	if _, err := cs.CoreV1().Pods(cfg.Namespace).Create(context.Background(), stalePod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create stale pod: %v", err)
+	}
+
+	tracker := cs.Tracker()
+	// The name is released when the stale pod is deleted, but by the time
+	// this Spawn's own pod Create runs, a concurrent Spawn has created the
+	// replacement: the Create returns AlreadyExists and a new-generation
+	// pod now occupies the name.
+	cs.PrependReactor("create", "pods", func(action fstesting.Action) (bool, runtime.Object, error) {
+		create := action.(fstesting.CreateAction)
+		obj := create.GetObject().(*corev1.Pod)
+		concurrent := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: obj.Name, Namespace: cfg.Namespace, UID: types.UID("uid-new-gen")},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.42.0.200",
+				ContainerStatuses: []corev1.ContainerStatus{
+					{Name: "agent", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+				},
+			},
+		}
+		_ = tracker.Add(concurrent)
+		return true, nil, apierrors.NewAlreadyExists(corev1.Resource("pods"), obj.Name)
+	})
+	spawner := NewPodSpawner(cs, cfg, nil)
+	spawner.skipHealthCheck = true
+
+	spec := hub.SpawnSpec{
+		SessionID:   "sess-create-aex",
+		SessionKind: sessions.KindInteractive,
+		Toolchain:   "golang",
+		HubURL:      "http://session-hub.session-system.svc.cluster.local:8787",
+		HubToken:    "tok-create-aex",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ep, err := spawner.Spawn(ctx, spec)
+	if err != nil {
+		t.Fatalf("Spawn with AlreadyExists pod Create failed: %v", err)
+	}
+	if ep != "http://10.42.0.200:8787" {
+		t.Fatalf("endpoint = %q, want adopted http://10.42.0.200:8787", ep)
+	}
+	got, err := cs.CoreV1().Pods(cfg.Namespace).Get(ctx, PodName(spec.SessionID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get replacement pod: %v", err)
+	}
+	if got.UID != "uid-new-gen" {
+		t.Fatalf("pod UID = %q, want adopted uid-new-gen", got.UID)
 	}
 }
 

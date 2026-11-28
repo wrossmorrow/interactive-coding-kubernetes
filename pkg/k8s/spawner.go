@@ -72,6 +72,14 @@ func (p *PodSpawner) ensureNamespacePolicies(ctx context.Context, hubURL string)
 }
 
 func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, error) {
+	// Mute the old pod generation's watchExit for the entire Spawn: it
+	// would otherwise report the terminated pod's exit mid-replacement
+	// (spurious pause broadcast, token revocation), and the mute must
+	// cover the preflight, delete, and create phases alike. Refcounted so
+	// overlapping Spawns for the same session cannot lift it early.
+	p.markReplacing(spec.SessionID)
+	defer p.unmarkReplacing(spec.SessionID)
+
 	if ep, ok := p.Endpoint(spec.SessionID); ok {
 		return ep, nil
 	}
@@ -93,12 +101,6 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 			p.setEndpoint(spec.SessionID, ep)
 			return ep, nil
 		}
-		// Mark the replacement in flight so the old generation's watchExit
-		// does not report exit during the delete->create name gap (which
-		// can outlast its NotFound debounce under API latency); cleared
-		// whenever this Spawn returns.
-		p.markReplacing(spec.SessionID)
-		defer p.unmarkReplacing(spec.SessionID)
 
 		graceZero := int64(0)
 		if derr := p.client.CoreV1().Pods(ns).Delete(ctx, podName, metav1.DeleteOptions{GracePeriodSeconds: &graceZero}); derr != nil && !apierrors.IsNotFound(derr) {
@@ -112,23 +114,8 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 		if gerr == nil && existing.UID != "" && remaining.UID != "" && remaining.UID != existing.UID {
 			// A different pod generation now owns the name: an overlapping
 			// Spawn (there is no per-session spawn lock) has already created
-			// this session's replacement and owns its exit watcher. Adopt
-			// it: wait for its IP and, when health checks are enabled, verify
-			// the endpoint is healthy before returning success (the creator's
-			// own health gate may still fail and Stop the pod), instead of
-			// failing on an already-replaced session.
-			podIP, werr := p.waitPodIP(ctx, podName)
-			if werr != nil {
-				return "", fmt.Errorf("wait for replacement sandbox pod %s: %w", podName, werr)
-			}
-			endpoint := fmt.Sprintf("http://%s:%d", podIP, p.cfg.SessiondPort)
-			if !p.skipHealthCheck {
-				if err := waitPodHealthy(ctx, endpoint+"/api/health", p.healthyWait); err != nil {
-					return "", fmt.Errorf("replacement sandbox pod %s health check failed: %w", podName, err)
-				}
-			}
-			p.setEndpoint(spec.SessionID, endpoint)
-			return endpoint, nil
+			// this session's replacement.
+			return p.adoptExistingPod(ctx, spec, podName)
 		}
 		if gerr == nil {
 			// The stale pod survived the force-delete (stuck finalizer, slow
@@ -154,6 +141,12 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 	pod := BuildSandboxPod(p.cfg, spec)
 	createdPod, err := p.client.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			// A concurrent Spawn created the replacement between our
+			// confirmation Get and this Create; adopt it rather than
+			// failing on a healthy, already-replaced session.
+			return p.adoptExistingPod(ctx, spec, podName)
+		}
 		_ = p.client.CoreV1().Secrets(ns).Delete(context.Background(), sec.Name, metav1.DeleteOptions{})
 		return "", fmt.Errorf("create sandbox pod: %w", err)
 	}
@@ -184,6 +177,27 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 
 	p.setEndpoint(spec.SessionID, endpoint)
 	go p.watchExit(spec.SessionID, podName, createdPod.UID)
+	return endpoint, nil
+}
+
+// adoptExistingPod takes over the endpoint for the pod that already occupies
+// podName because an overlapping Spawn created it. It waits for the pod to
+// have an IP and, when health checks are enabled, verifies the endpoint is
+// healthy before caching and returning it, instead of failing on an
+// already-replaced session. It deliberately does not stop the pod or start a
+// watcher: the creator Spawn owns the pod's lifecycle and its exit watcher.
+func (p *PodSpawner) adoptExistingPod(ctx context.Context, spec hub.SpawnSpec, podName string) (string, error) {
+	podIP, err := p.waitPodIP(ctx, podName)
+	if err != nil {
+		return "", fmt.Errorf("wait for replacement sandbox pod %s: %w", podName, err)
+	}
+	endpoint := fmt.Sprintf("http://%s:%d", podIP, p.cfg.SessiondPort)
+	if !p.skipHealthCheck {
+		if err := waitPodHealthy(ctx, endpoint+"/api/health", p.healthyWait); err != nil {
+			return "", fmt.Errorf("replacement sandbox pod %s health check failed: %w", podName, err)
+		}
+	}
+	p.setEndpoint(spec.SessionID, endpoint)
 	return endpoint, nil
 }
 
