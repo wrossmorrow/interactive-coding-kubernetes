@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/wrossmorrow/k8s-agents/pkg/sessions"
 )
@@ -57,6 +58,10 @@ func (s *Server) handleAnalystListSessions(w http.ResponseWriter, r *http.Reques
 		var meta sessions.Metadata
 		if err := json.Unmarshal(b, &meta); err != nil {
 			continue
+		}
+		meta.Running = s.spawner != nil && s.spawner.Running(meta.SessionID)
+		if meta.Status == sessions.StatusActive && !meta.Running {
+			meta.Status = sessions.StatusPaused
 		}
 		if kindFilter != "" && string(meta.SessionKind) != kindFilter {
 			continue
@@ -173,6 +178,9 @@ func (s *Server) handleAnalystSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	const maxScannedSessions = 500
+	scanned := 0
+	truncated := false
 	hits := make([]analystSearchHit, 0)
 	for _, k := range keys {
 		if !strings.HasSuffix(k, "/metadata.json") {
@@ -181,6 +189,11 @@ func (s *Server) handleAnalystSearch(w http.ResponseWriter, r *http.Request) {
 		if len(hits) >= limit {
 			break
 		}
+		if scanned >= maxScannedSessions {
+			truncated = true
+			break
+		}
+		scanned++
 		b, err := s.store.Get(r.Context(), k)
 		if err != nil {
 			continue
@@ -194,10 +207,9 @@ func (s *Server) handleAnalystSearch(w http.ResponseWriter, r *http.Request) {
 			snippets = append(snippets, "matched metadata")
 		}
 		if raw, err := sessions.ReadRawJSONL(r.Context(), s.store, meta.SessionID); err == nil && len(raw) > 0 {
-			text := string(raw)
-			lowerText := strings.ToLower(text)
+			lowerText := strings.ToLower(string(raw))
 			searchFrom := 0
-			for len(snippets) < 3 {
+			for len(snippets) < 3 && searchFrom < len(lowerText) {
 				idx := strings.Index(lowerText[searchFrom:], lowerQ)
 				if idx < 0 {
 					break
@@ -207,12 +219,18 @@ func (s *Server) handleAnalystSearch(w http.ResponseWriter, r *http.Request) {
 				if start < 0 {
 					start = 0
 				}
-				end := abs + len(query) + 100
-				if end > len(text) {
-					end = len(text)
+				for start > 0 && !utf8.RuneStart(lowerText[start]) {
+					start--
 				}
-				snippets = append(snippets, strings.TrimSpace(text[start:end]))
-				searchFrom = abs + len(query)
+				end := abs + len(lowerQ) + 100
+				if end > len(lowerText) {
+					end = len(lowerText)
+				}
+				for end < len(lowerText) && !utf8.RuneStart(lowerText[end]) {
+					end++
+				}
+				snippets = append(snippets, strings.TrimSpace(lowerText[start:end]))
+				searchFrom = abs + len(lowerQ)
 			}
 		}
 		if len(snippets) > 0 {
@@ -227,5 +245,5 @@ func (s *Server) handleAnalystSearch(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"query": query, "hits": hits})
+	writeJSON(w, http.StatusOK, map[string]any{"query": query, "hits": hits, "scanned": scanned, "truncated": truncated})
 }

@@ -92,6 +92,9 @@ func (s *Server) SetHubBaseURL(u string) {
 // NotifyExit should be called by the spawner when a session daemon exits so
 // connected inbox clients see the updated paused/closed state promptly.
 func (s *Server) NotifyExit(sessionID string) {
+	if s.spawner != nil && s.spawner.Running(sessionID) {
+		return
+	}
 	s.tokens.Revoke(sessionID)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

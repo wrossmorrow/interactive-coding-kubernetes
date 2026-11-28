@@ -144,6 +144,17 @@ func TestAnalystReadOnlyAPIAndSecurityBoundaries(t *testing.T) {
 		t.Fatalf("unexpected search hits: %+v", sr.Hits)
 	}
 
+	// 5b. Unicode case-folding search (e.g. 'İ' changes UTF-8 byte length under ToLower) must not panic.
+	gzUni, _ := sessions.GzipBytes([]byte(`{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"İstanbul İ"}]}}` + "\n"))
+	_ = store.Put(context.Background(), sessions.PartKey(m1.SessionID, 1), gzUni, sessions.PartContentType)
+	rUni := httptest.NewRequest(http.MethodGet, "/internal/analyst/search?q=%C4%B0", nil)
+	rUni.Header.Set("Authorization", "Bearer "+issuedAnalystTok)
+	wUni := httptest.NewRecorder()
+	h.ServeHTTP(wUni, rUni)
+	if wUni.Code != http.StatusOK {
+		t.Fatalf("unicode analyst search status = %d: %s", wUni.Code, wUni.Body.String())
+	}
+
 	// 6. Rejoining an already-running analyst session must not rotate/break its token.
 	createBody := `{"kind":"analyst","name":"audit-run","toolchain":"agent"}`
 	rCreate := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(createBody))
@@ -179,7 +190,18 @@ func TestAnalystReadOnlyAPIAndSecurityBoundaries(t *testing.T) {
 		t.Fatalf("original analyst token rejected after rejoin-while-running: %d %s", wCheck.Code, wCheck.Body.String())
 	}
 
-	// 7. Closing / exiting an analyst session revokes its in-memory analyst token.
+	// 7. Stale NotifyExit while session is still running must NOT revoke its token;
+	// once the spawner marks it stopped, NotifyExit revokes the in-memory token.
+	srv.NotifyExit(created.SessionID)
+	rStillLive := httptest.NewRequest(http.MethodGet, "/internal/analyst/sessions", nil)
+	rStillLive.Header.Set("Authorization", "Bearer "+origTok)
+	wStillLive := httptest.NewRecorder()
+	h.ServeHTTP(wStillLive, rStillLive)
+	if wStillLive.Code != http.StatusOK {
+		t.Fatalf("stale NotifyExit while running revoked live token: %d %s", wStillLive.Code, wStillLive.Body.String())
+	}
+
+	_ = spawner.Stop(context.Background(), created.SessionID)
 	srv.NotifyExit(created.SessionID)
 	rRevoked := httptest.NewRequest(http.MethodGet, "/internal/analyst/sessions", nil)
 	rRevoked.Header.Set("Authorization", "Bearer "+origTok)
