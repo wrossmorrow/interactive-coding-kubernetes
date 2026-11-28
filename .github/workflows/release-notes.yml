@@ -37,7 +37,7 @@ jobs:
             Inspect the commits and actual code diff between the previous release tag
             and ${{ inputs.tag || github.ref_name }}, and draft clean Markdown release notes
             grouped into Highlights, Features, Bug Fixes, and Docs/CI. Verify every
-            referenced CRD field, CLI flag, endpoint, and Action input/output against
+            referenced Helm value, CLI flag, HTTP endpoint, and UI control against
             the actual repository state at ${{ inputs.tag || github.ref_name }}.
           fail-on: none
           output: release-draft
