@@ -599,18 +599,44 @@ func BuildSandboxPod(cfg PodConfig, spec hub.SpawnSpec) *corev1.Pod {
 						InitialDelaySeconds: 1,
 						PeriodSeconds:       2,
 					},
-					Resources: corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU:    resource.MustParse("500m"),
-							corev1.ResourceMemory: resource.MustParse("1Gi"),
-						},
-					},
+					Resources: sandboxResources(kind, tc, spec.Size),
 				},
 			},
 			Volumes: volumes,
 		},
 	}
 	return pod
+}
+
+func sandboxResources(kind sessions.Kind, toolchain, size string) corev1.ResourceRequirements {
+	s := strings.ToLower(strings.TrimSpace(size))
+	if s == "" {
+		if kind == sessions.KindAnalyst {
+			s = sessions.SizeSmall
+		} else {
+			switch toolchain {
+			case "golang", "rust", "java17", "java21":
+				s = sessions.SizeMedium
+			default:
+				s = sessions.SizeSmall
+			}
+		}
+	}
+	var cpu, mem string
+	switch s {
+	case sessions.SizeLarge:
+		cpu, mem = "4000m", "8Gi"
+	case sessions.SizeMedium:
+		cpu, mem = "2000m", "4Gi"
+	default:
+		cpu, mem = "1000m", "2Gi"
+	}
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(cpu),
+			corev1.ResourceMemory: resource.MustParse(mem),
+		},
+	}
 }
 
 func urlHost(raw string) string {

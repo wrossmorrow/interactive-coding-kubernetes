@@ -26,6 +26,23 @@ const (
 // DefaultMaxWakeupsPerHumanTurn bounds automated author-vs-reviewer loops.
 const DefaultMaxWakeupsPerHumanTurn = 1
 
+// Sandbox resource size presets.
+const (
+	SizeSmall  = "small"
+	SizeMedium = "medium"
+	SizeLarge  = "large"
+)
+
+// ValidSize reports whether s is an accepted sandbox size preset (empty means auto).
+func ValidSize(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", SizeSmall, SizeMedium, SizeLarge:
+		return true
+	default:
+		return false
+	}
+}
+
 // Status represents the lifecycle state of a session.
 type Status string
 
@@ -93,6 +110,7 @@ type Metadata struct {
 	Findings               int            `json:"findings,omitempty"`
 	Turns                  int            `json:"turns,omitempty"`
 	Toolchain              string         `json:"toolchain,omitempty"`
+	Size                   string         `json:"size,omitempty"`
 	ForkedFrom             string         `json:"forked_from,omitempty"`
 	WakePolicy             WakePolicy     `json:"wake_policy,omitempty"`
 	MaxWakeupsPerHumanTurn int            `json:"max_wakeups_per_human_turn,omitempty"`
