@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wrossmorrow/k8s-agents/pkg/piconfig"
 	"github.com/wrossmorrow/k8s-agents/pkg/sessions"
 )
 
@@ -104,7 +105,9 @@ func (l *LocalSpawner) Spawn(ctx context.Context, spec SpawnSpec) (string, error
 	}
 	agentDir := filepath.Join(workRoot, ".agent-"+spec.SessionID)
 
-	env := append([]string(nil), os.Environ()...)
+	// Scrub hub/cloud/GitHub credentials from the inherited environment so local
+	// pi-sessiond and pi subprocesses never inherit session-hub secrets.
+	env := piconfig.ScrubEnv(os.Environ(), nil)
 	env = append(env,
 		"SESSION_ID="+spec.SessionID,
 		"SESSION_NAME="+spec.SessionName,
@@ -135,9 +138,11 @@ func (l *LocalSpawner) Spawn(ctx context.Context, spec SpawnSpec) (string, error
 	if spec.Model != "" {
 		env = append(env, "PI_MODEL="+spec.Model)
 	}
-	agentsMD := l.cfg.AgentsMDPath
-	if spec.SessionKind == sessions.KindAnalyst && l.cfg.AnalystAgentsMDPath != "" {
+	var agentsMD string
+	if spec.SessionKind == sessions.KindAnalyst {
 		agentsMD = l.cfg.AnalystAgentsMDPath
+	} else {
+		agentsMD = l.cfg.AgentsMDPath
 	}
 	if agentsMD != "" {
 		if abs, err := filepath.Abs(agentsMD); err == nil {

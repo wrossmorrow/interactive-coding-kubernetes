@@ -178,4 +178,14 @@ func TestAnalystReadOnlyAPIAndSecurityBoundaries(t *testing.T) {
 	if wCheck.Code != http.StatusOK {
 		t.Fatalf("original analyst token rejected after rejoin-while-running: %d %s", wCheck.Code, wCheck.Body.String())
 	}
+
+	// 7. Closing / exiting an analyst session revokes its in-memory analyst token.
+	srv.NotifyExit(created.SessionID)
+	rRevoked := httptest.NewRequest(http.MethodGet, "/internal/analyst/sessions", nil)
+	rRevoked.Header.Set("Authorization", "Bearer "+origTok)
+	wRevoked := httptest.NewRecorder()
+	h.ServeHTTP(wRevoked, rRevoked)
+	if wRevoked.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked analyst token status = %d, want 401", wRevoked.Code)
+	}
 }
