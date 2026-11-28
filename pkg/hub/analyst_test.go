@@ -30,12 +30,15 @@ func TestAnalystReadOnlyAPIAndSecurityBoundaries(t *testing.T) {
 			}
 			return "", false
 		},
-		AnalystTokenLookup: func(tok string) bool {
-			return tok != "" && tok == issuedAnalystTok
+		AnalystTokenLookup: func(id string) (string, bool) {
+			if id == "sess-analyst-1" {
+				return issuedAnalystTok, issuedAnalystTok != ""
+			}
+			return "", false
 		},
 	})
 	issuedInteractiveTok = "interactive-write-tok"
-	issuedAnalystTok = "an_readonly_tok"
+	issuedAnalystTok = "an_sess-analyst-1.readonlytok"
 
 	// Seed one interactive session and one archived CI review session.
 	m1 := sessions.Metadata{
@@ -139,5 +142,40 @@ func TestAnalystReadOnlyAPIAndSecurityBoundaries(t *testing.T) {
 	_ = json.Unmarshal(wSearch.Body.Bytes(), &sr)
 	if len(sr.Hits) != 1 || sr.Hits[0].SessionID != "sess-review-2" || len(sr.Hits[0].Snippets) == 0 {
 		t.Fatalf("unexpected search hits: %+v", sr.Hits)
+	}
+
+	// 6. Rejoining an already-running analyst session must not rotate/break its token.
+	createBody := `{"kind":"analyst","name":"audit-run","toolchain":"agent"}`
+	rCreate := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(createBody))
+	rCreate.Host = "127.0.0.1:8787"
+	rCreate.Header.Set("Content-Type", "application/json")
+	wCreate := httptest.NewRecorder()
+	h.ServeHTTP(wCreate, rCreate)
+	if wCreate.Code != http.StatusCreated {
+		t.Fatalf("create analyst session = %d: %s", wCreate.Code, wCreate.Body.String())
+	}
+	var created sessions.Metadata
+	_ = json.Unmarshal(wCreate.Body.Bytes(), &created)
+	origTok := spawner.lastSpec.AnalystToken
+	if origTok == "" {
+		t.Fatal("expected analyst token on initial Spawn")
+	}
+
+	rRejoin := httptest.NewRequest(http.MethodPost, "/api/sessions/"+created.SessionID+"/rejoin", nil)
+	rRejoin.Host = "127.0.0.1:8787"
+	rRejoin.Header.Set("Content-Type", "application/json")
+	wRejoin := httptest.NewRecorder()
+	h.ServeHTTP(wRejoin, rRejoin)
+	if wRejoin.Code != http.StatusOK {
+		t.Fatalf("rejoin running analyst session = %d: %s", wRejoin.Code, wRejoin.Body.String())
+	}
+
+	// Original analyst token must still be accepted after rejoin-while-running.
+	rCheck := httptest.NewRequest(http.MethodGet, "/internal/analyst/sessions", nil)
+	rCheck.Header.Set("Authorization", "Bearer "+origTok)
+	wCheck := httptest.NewRecorder()
+	h.ServeHTTP(wCheck, rCheck)
+	if wCheck.Code != http.StatusOK {
+		t.Fatalf("original analyst token rejected after rejoin-while-running: %d %s", wCheck.Code, wCheck.Body.String())
 	}
 }

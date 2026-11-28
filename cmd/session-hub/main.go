@@ -92,7 +92,7 @@ func main() {
 		srv                *hub.Server
 		spawner            hub.Spawner
 		tokenLookup        func(string) (string, bool)
-		analystTokenLookup func(string) bool
+		analystTokenLookup func(string) (string, bool)
 	)
 	onExit := func(id string) {
 		if srv != nil {
@@ -132,7 +132,7 @@ func main() {
 		}, onExit)
 		spawner = k8sSpawner
 		tokenLookup = k8sSpawner.LookupToken
-		analystTokenLookup = k8sSpawner.VerifyAnalystToken
+		analystTokenLookup = k8sSpawner.LookupAnalystToken
 	default:
 		log.Fatalf("unsupported --spawner=%q (want local or k8s)", *spawnerMode)
 	}

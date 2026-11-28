@@ -2,7 +2,6 @@ package k8s
 
 import (
 	"context"
-	"crypto/subtle"
 	"fmt"
 	"log"
 	"net/http"
@@ -84,7 +83,7 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 	}
 
 	// Create or replace the per-session scoped bearer token Secret.
-	sec := BuildTokenSecret(ns, spec.SessionID, spec.HubToken, spec.AnalystToken)
+	sec := BuildTokenSecret(ns, spec.SessionID, spec.SessionKind, spec.HubToken, spec.AnalystToken)
 	_ = p.client.CoreV1().Secrets(ns).Delete(ctx, sec.Name, metav1.DeleteOptions{})
 	createdSec, err := p.client.CoreV1().Secrets(ns).Create(ctx, sec, metav1.CreateOptions{})
 	if err != nil {
@@ -205,37 +204,26 @@ func (p *PodSpawner) LookupToken(sessionID string) (string, bool) {
 	if tok := string(sec.Data["token"]); tok != "" {
 		return tok, true
 	}
-	if tok := sec.StringData["token"]; tok != "" {
-		return tok, true
-	}
 	return "", false
 }
 
-// VerifyAnalystToken checks whether token matches any active analyst session's
-// Kubernetes Secret so session-hub restarts seamlessly keep analyst pods authorized.
-func (p *PodSpawner) VerifyAnalystToken(token string) bool {
-	if token == "" {
-		return false
+// LookupAnalystToken retrieves the read-only analyst token for sessionID directly
+// from its named Kubernetes Secret (requiring only Secret get, not list) so
+// session-hub restarts seamlessly keep analyst pods authorized.
+func (p *PodSpawner) LookupAnalystToken(sessionID string) (string, bool) {
+	if sessionID == "" {
+		return "", false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	list, err := p.client.CoreV1().Secrets(p.cfg.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: LabelKind + "=analyst",
-	})
+	sec, err := p.client.CoreV1().Secrets(p.cfg.Namespace).Get(ctx, TokenSecretName(sessionID), metav1.GetOptions{})
 	if err != nil {
-		return false
+		return "", false
 	}
-	for i := range list.Items {
-		sec := &list.Items[i]
-		want := string(sec.Data["analyst-token"])
-		if want == "" {
-			want = sec.StringData["analyst-token"]
-		}
-		if want != "" && subtle.ConstantTimeCompare([]byte(want), []byte(token)) == 1 {
-			return true
-		}
+	if tok := string(sec.Data["analyst-token"]); tok != "" {
+		return tok, true
 	}
-	return false
+	return "", false
 }
 
 func (p *PodSpawner) setEndpoint(sessionID, ep string) {

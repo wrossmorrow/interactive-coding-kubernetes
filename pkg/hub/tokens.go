@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"strings"
 	"sync"
 )
 
@@ -15,7 +16,7 @@ type TokenManager struct {
 	tokens        map[string]string // sessionID -> write-scoped session token
 	analystTokens map[string]string // sessionID -> read-only analyst token
 	lookup        func(sessionID string) (string, bool)
-	analystLookup func(token string) bool
+	analystLookup func(sessionID string) (string, bool)
 }
 
 func NewTokenManager() *TokenManager {
@@ -34,25 +35,39 @@ func (m *TokenManager) SetLookup(fn func(sessionID string) (string, bool)) {
 	m.mu.Unlock()
 }
 
-// SetAnalystLookup configures an optional durable fallback for verifying
-// read-only analyst tokens after a session-hub restart.
-func (m *TokenManager) SetAnalystLookup(fn func(token string) bool) {
+// SetAnalystLookup configures an optional durable fallback (e.g. direct Get of
+// the per-session Kubernetes Secret by sessionID) for verifying read-only
+// analyst tokens after a session-hub restart without requiring Secret list RBAC.
+func (m *TokenManager) SetAnalystLookup(fn func(sessionID string) (string, bool)) {
 	m.mu.Lock()
 	m.analystLookup = fn
 	m.mu.Unlock()
 }
 
 // IssueAnalyst returns a freshly generated read-only bearer token for an
-// analyst session. This token is distinct from the per-session write token and
-// is accepted only on /internal/analyst/* read endpoints.
+// analyst session in the format "an_<sessionID>.<hex>". This token is distinct
+// from the per-session write token and is accepted only on /internal/analyst/*
+// read endpoints.
 func (m *TokenManager) IssueAnalyst(sessionID string) string {
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)
-	tok := "an_" + hex.EncodeToString(b)
+	tok := "an_" + sessionID + "." + hex.EncodeToString(b)
 	m.mu.Lock()
 	m.analystTokens[sessionID] = tok
 	m.mu.Unlock()
 	return tok
+}
+
+func parseAnalystTokenSessionID(token string) (string, bool) {
+	rest, ok := strings.CutPrefix(token, "an_")
+	if !ok {
+		return "", false
+	}
+	sessionID, secret, ok := strings.Cut(rest, ".")
+	if !ok || sessionID == "" || secret == "" {
+		return "", false
+	}
+	return sessionID, true
 }
 
 // VerifyAnalyst reports whether token is a valid read-only analyst token.
@@ -70,7 +85,16 @@ func (m *TokenManager) VerifyAnalyst(token string) bool {
 	lookup := m.analystLookup
 	m.mu.RUnlock()
 	if lookup != nil {
-		return lookup(token)
+		if sessionID, ok := parseAnalystTokenSessionID(token); ok {
+			if recovered, found := lookup(sessionID); found && recovered != "" {
+				if subtle.ConstantTimeCompare([]byte(recovered), []byte(token)) == 1 {
+					m.mu.Lock()
+					m.analystTokens[sessionID] = recovered
+					m.mu.Unlock()
+					return true
+				}
+			}
+		}
 	}
 	return false
 }

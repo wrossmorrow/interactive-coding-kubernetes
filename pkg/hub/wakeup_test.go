@@ -42,12 +42,14 @@ type fakeSpawner struct {
 	endpoint string
 	running  map[string]bool
 	spawns   int
+	lastSpec hub.SpawnSpec
 }
 
 func (f *fakeSpawner) Spawn(_ context.Context, spec hub.SpawnSpec) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.spawns++
+	f.lastSpec = spec
 	f.running[spec.SessionID] = true
 	return f.endpoint, nil
 }

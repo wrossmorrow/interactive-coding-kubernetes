@@ -31,7 +31,7 @@ type Config struct {
 	HubBaseURL         string // Internal URL passed to spawned pi-sessiond instances
 	ArchiveSinkToken   string // Shared bearer token for agentrunner POST /internal/archive
 	TokenLookup        func(sessionID string) (string, bool)
-	AnalystTokenLookup func(token string) bool
+	AnalystTokenLookup func(sessionID string) (string, bool)
 	AllowedHosts       []string
 }
 
@@ -417,6 +417,11 @@ func (s *Server) handleRejoinSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) rejoinSession(ctx context.Context, meta *sessions.Metadata) (*sessions.Metadata, error) {
 	id := meta.SessionID
+	if s.spawner.Running(id) {
+		meta.Status = sessions.StatusActive
+		meta.Running = true
+		return meta, nil
+	}
 	provider, _ := meta.ModelConfig["provider"].(string)
 	modelID, _ := meta.ModelConfig["modelId"].(string)
 	if provider == "" {

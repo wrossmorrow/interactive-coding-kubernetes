@@ -166,18 +166,18 @@ func (c PodConfig) SandboxImage(toolchain string) string {
 
 // BuildTokenSecret constructs the per-session scoped bearer token Secret.
 // For analyst sessions it also stores the separate read-only analyst-token key.
-func BuildTokenSecret(namespace, sessionID, token, analystToken string) *corev1.Secret {
+func BuildTokenSecret(namespace, sessionID string, kind sessions.Kind, token, analystToken string) *corev1.Secret {
 	labels := map[string]string{
 		LabelApp:       "pi-sessiond",
 		LabelComponent: "sandbox",
 		LabelSessionID: sessionID,
 	}
-	data := map[string]string{
-		"token": token,
+	data := map[string][]byte{
+		"token": []byte(token),
 	}
-	if analystToken != "" {
+	if kind == sessions.KindAnalyst && analystToken != "" {
 		labels[LabelKind] = string(sessions.KindAnalyst)
-		data["analyst-token"] = analystToken
+		data["analyst-token"] = []byte(analystToken)
 	}
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -185,8 +185,8 @@ func BuildTokenSecret(namespace, sessionID, token, analystToken string) *corev1.
 			Namespace: namespace,
 			Labels:    labels,
 		},
-		Type:       corev1.SecretTypeOpaque,
-		StringData: data,
+		Type: corev1.SecretTypeOpaque,
+		Data: data,
 	}
 }
 
