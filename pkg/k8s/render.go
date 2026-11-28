@@ -44,7 +44,11 @@ var DefaultEgressAllowlist = []string{
 	".githubusercontent.com",
 	"proxy.golang.org",
 	"sum.golang.org",
-	"storage.googleapis.com", // proxy.golang.org redirects module zip downloads here
+	// proxy.golang.org redirects module zip downloads to storage.googleapis.com.
+	// Accepted tradeoff: Squid dstdomain is host-only (no path ACL over HTTPS
+	// CONNECT), so sandboxes can read public GCS objects; private buckets remain
+	// inaccessible because sandbox pods hold zero GCP credentials / WI.
+	"storage.googleapis.com",
 	"pypi.org",
 	"files.pythonhosted.org",
 	"crates.io",
