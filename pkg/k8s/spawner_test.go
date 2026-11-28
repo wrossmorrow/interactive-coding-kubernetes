@@ -157,6 +157,106 @@ func TestPodSpawnerLifecycleAndRediscovery(t *testing.T) {
 	}
 }
 
+func TestAgentContainerTerminatedInRunningPod(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
+	spawner := NewPodSpawner(cs, cfg, nil)
+	spawner.skipHealthCheck = true
+
+	spec := hub.SpawnSpec{
+		SessionID:   "sess-agent-exit",
+		SessionKind: sessions.KindInteractive,
+		Toolchain:   "agent",
+		HubURL:      "http://session-hub.session-system.svc.cluster.local:8787",
+		HubToken:    "tok-agent-exit",
+	}
+	podName := PodName(spec.SessionID)
+
+	// PodRunning pod with an IP, but the agent container has terminated while
+	// a native sidecar keeps the pod phase Running.
+	terminated := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: cfg.Namespace},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.42.0.99",
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "agent", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+				{Name: "egress-proxy", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			},
+		},
+	}
+	if _, err := cs.CoreV1().Pods(cfg.Namespace).Create(context.Background(), terminated, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create terminated pod: %v", err)
+	}
+
+	// Endpoint/Running must treat the pod as not running even though phase is Running.
+	if ep, ok := spawner.Endpoint(spec.SessionID); ok {
+		t.Fatalf("Endpoint = (%q, true), want (\"\", false) for terminated agent container", ep)
+	}
+	if spawner.Running(spec.SessionID) {
+		t.Fatal("Running = true, want false for terminated agent container")
+	}
+
+	// WaitExit must return promptly for a terminated agent container.
+	weCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	done := make(chan struct{})
+	go func() {
+		spawner.WaitExit(weCtx, spec.SessionID)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WaitExit did not return for terminated agent container")
+	}
+	cancel()
+
+	// Simulate kubelet bringing the replacement pod to Running with a new IP.
+	go func() {
+		for i := 0; i < 100; i++ {
+			time.Sleep(50 * time.Millisecond)
+			pod, err := cs.CoreV1().Pods(cfg.Namespace).Get(context.Background(), podName, metav1.GetOptions{})
+			if err != nil || pod.Status.Phase != "" {
+				continue
+			}
+			pod.Status.Phase = corev1.PodRunning
+			pod.Status.PodIP = "10.42.0.100"
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+				{Name: "agent", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			}
+			_, _ = cs.CoreV1().Pods(cfg.Namespace).UpdateStatus(context.Background(), pod, metav1.UpdateOptions{})
+		}
+	}()
+
+	// Spawn must delete the terminated pod and create a fresh one.
+	ctx, cancel2 := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel2()
+	ep, err := spawner.Spawn(ctx, spec)
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+	if ep != "http://10.42.0.100:8787" {
+		t.Fatalf("endpoint = %q, want http://10.42.0.100:8787", ep)
+	}
+
+	// Verify the old terminated pod was replaced by a fresh one.
+	got, err := cs.CoreV1().Pods(cfg.Namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get replacement pod: %v", err)
+	}
+	if got.Status.PodIP != "10.42.0.100" {
+		t.Fatalf("replacement pod IP = %q, want 10.42.0.100", got.Status.PodIP)
+	}
+	for _, cst := range got.Status.ContainerStatuses {
+		if cst.Name == "agent" && cst.State.Terminated != nil {
+			t.Fatal("agent container still terminated after Spawn replacement")
+		}
+	}
+	if !spawner.Running(spec.SessionID) {
+		t.Fatal("expected Running=true after respawn")
+	}
+}
+
 func TestBuildTokenSecretAndLookupAnalystToken(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
