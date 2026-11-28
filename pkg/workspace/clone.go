@@ -36,8 +36,12 @@ func EnsureCloned(ctx context.Context, dir, repo, branch string) error {
 		// os.Executable() to /usr/local/lib/gh/gh and bypasses the /tokens/token shim)
 		// without mutating the caller's global ~/.gitconfig in local dev mode.
 		helper := "!" + ghPath + " auth git-credential"
-		_ = gitRun(ctx, dir, "config", "--local", "--add", "credential.https://github.com.helper", "")
-		_ = gitRun(ctx, dir, "config", "--local", "--add", "credential.https://github.com.helper", helper)
+		if err := gitRun(ctx, dir, "config", "--local", "--add", "credential.https://github.com.helper", ""); err != nil {
+			return fmt.Errorf("reset git credential helper: %w", err)
+		}
+		if err := gitRun(ctx, dir, "config", "--local", "--add", "credential.https://github.com.helper", helper); err != nil {
+			return fmt.Errorf("configure git credential helper: %w", err)
+		}
 	} else {
 		url := repo
 		if !strings.Contains(repo, "://") && !strings.HasPrefix(repo, "git@") {
