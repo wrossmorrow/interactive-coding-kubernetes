@@ -16,6 +16,28 @@
       <span class="sb-brand">π sessions</span>
       <button id="btn-new" type="button" class="btn primary">+ new</button>
     </div>
+    <div class="sb-filters">
+      <input id="sb-search" type="search" placeholder="search name, id, repo, branch, model, PR, wake…" autocomplete="off" spellcheck="false">
+      <div class="sb-filter-row">
+        <select id="sb-kind" title="Filter by session kind">
+          <option value="all">All</option>
+          <option value="interactive">Interactive</option>
+          <option value="analyst">Analyst</option>
+          <option value="review">CI Review</option>
+        </select>
+        <select id="sb-status" title="Filter by session status">
+          <option value="all">All</option>
+          <option value="live">Active / Needs Attention</option>
+          <option value="paused">Paused</option>
+          <option value="closed">Closed</option>
+        </select>
+      </div>
+      <div id="sb-filter-meta" class="sb-filter-row" hidden>
+        <span id="sb-count" class="dim"></span>
+        <span class="grow"></span>
+        <button id="sb-clear" type="button" class="mini-btn">clear filters</button>
+      </div>
+    </div>
     <div id="session-list"></div>
   </aside>
 
