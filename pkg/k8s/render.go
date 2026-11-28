@@ -622,19 +622,20 @@ func sandboxResources(kind sessions.Kind, toolchain, size string) corev1.Resourc
 			}
 		}
 	}
-	var cpu, mem string
+	var cpu, mem, disk string
 	switch s {
 	case sessions.SizeLarge:
-		cpu, mem = "4000m", "8Gi"
+		cpu, mem, disk = "4000m", "8Gi", "16Gi"
 	case sessions.SizeMedium:
-		cpu, mem = "2000m", "4Gi"
+		cpu, mem, disk = "2000m", "4Gi", "8Gi"
 	default:
-		cpu, mem = "1000m", "2Gi"
+		cpu, mem, disk = "1000m", "2Gi", "4Gi"
 	}
 	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse(cpu),
-			corev1.ResourceMemory: resource.MustParse(mem),
+			corev1.ResourceCPU:              resource.MustParse(cpu),
+			corev1.ResourceMemory:           resource.MustParse(mem),
+			corev1.ResourceEphemeralStorage: resource.MustParse(disk),
 		},
 	}
 }

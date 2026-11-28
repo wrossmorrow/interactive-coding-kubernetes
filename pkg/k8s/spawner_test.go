@@ -223,13 +223,14 @@ func TestBuildSandboxPodResourceSizes(t *testing.T) {
 		size      string
 		wantCPU   string
 		wantMem   string
+		wantDisk  string
 	}{
-		{"golang auto defaults to medium", sessions.KindInteractive, "golang", "", "2", "4Gi"},
-		{"rust auto defaults to medium", sessions.KindInteractive, "rust", "", "2", "4Gi"},
-		{"python auto defaults to small", sessions.KindInteractive, "python", "", "1", "2Gi"},
-		{"analyst auto defaults to small even on golang", sessions.KindAnalyst, "golang", "", "1", "2Gi"},
-		{"explicit small overrides golang", sessions.KindInteractive, "golang", sessions.SizeSmall, "1", "2Gi"},
-		{"explicit large", sessions.KindInteractive, "golang", sessions.SizeLarge, "4", "8Gi"},
+		{"golang auto defaults to medium", sessions.KindInteractive, "golang", "", "2", "4Gi", "8Gi"},
+		{"rust auto defaults to medium", sessions.KindInteractive, "rust", "", "2", "4Gi", "8Gi"},
+		{"python auto defaults to small", sessions.KindInteractive, "python", "", "1", "2Gi", "4Gi"},
+		{"analyst auto defaults to small even on golang", sessions.KindAnalyst, "golang", "", "1", "2Gi", "4Gi"},
+		{"explicit small overrides golang", sessions.KindInteractive, "golang", sessions.SizeSmall, "1", "2Gi", "4Gi"},
+		{"explicit large", sessions.KindInteractive, "golang", sessions.SizeLarge, "4", "8Gi", "16Gi"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -245,6 +246,9 @@ func TestBuildSandboxPodResourceSizes(t *testing.T) {
 			}
 			if got := req.Memory().String(); got != tc.wantMem {
 				t.Fatalf("memory = %q, want %q", got, tc.wantMem)
+			}
+			if got := req.StorageEphemeral().String(); got != tc.wantDisk {
+				t.Fatalf("ephemeral-storage = %q, want %q", got, tc.wantDisk)
 			}
 		})
 	}
