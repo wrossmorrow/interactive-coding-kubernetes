@@ -175,6 +175,7 @@ button, input, select { font: inherit; color: inherit; }
   padding: 8px 16px; background: var(--customMessageBg); border-bottom: 1px solid var(--border);
   font-size: 12.5px; color: var(--muted);
 }
+#archive-banner[hidden] { display: none; }
 #archive-actions { display: flex; gap: 8px; }
 
 /* ---------- transcript ---------- */
