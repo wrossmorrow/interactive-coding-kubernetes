@@ -135,7 +135,19 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 	_ = p.client.CoreV1().Secrets(ns).Delete(ctx, sec.Name, metav1.DeleteOptions{})
 	createdSec, err := p.client.CoreV1().Secrets(ns).Create(ctx, sec, metav1.CreateOptions{})
 	if err != nil {
-		return "", fmt.Errorf("create session token secret: %w", err)
+		if apierrors.IsAlreadyExists(err) {
+			// A concurrent Spawn (re)created the secret between our Delete
+			// and Create. Reuse it rather than failing the Spawn: the pod
+			// (ours or the concurrent one adopted below) reads whatever
+			// token the secret holds at container start, so aborting here
+			// would report a healthy session as failed.
+			createdSec, err = p.client.CoreV1().Secrets(ns).Get(ctx, sec.Name, metav1.GetOptions{})
+			if err != nil {
+				return "", fmt.Errorf("read concurrent session token secret: %w", err)
+			}
+		} else {
+			return "", fmt.Errorf("create session token secret: %w", err)
+		}
 	}
 
 	pod := BuildSandboxPod(p.cfg, spec)

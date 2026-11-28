@@ -806,6 +806,66 @@ func TestSpawnAEXAdoptFailureKeepsSharedSecret(t *testing.T) {
 	}
 }
 
+func TestSpawnReusesConcurrentSecretOnCreateAlreadyExists(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
+	tracker := cs.Tracker()
+	// A concurrent Spawn creates the token secret between our Delete and
+	// Create; the Create returns AlreadyExists.
+	cs.PrependReactor("create", "secrets", func(action fstesting.Action) (bool, runtime.Object, error) {
+		concurrent := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: TokenSecretName("sess-secret-aex"), Namespace: cfg.Namespace},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{"token": []byte("tok-other-gen")},
+		}
+		_ = tracker.Add(concurrent)
+		return true, nil, apierrors.NewAlreadyExists(corev1.Resource("secrets"), concurrent.Name)
+	})
+	spawner := NewPodSpawner(cs, cfg, nil)
+	spawner.skipHealthCheck = true
+
+	spec := hub.SpawnSpec{
+		SessionID:   "sess-secret-aex",
+		SessionKind: sessions.KindInteractive,
+		Toolchain:   "golang",
+		HubURL:      "http://session-hub.session-system.svc.cluster.local:8787",
+		HubToken:    "tok-this-spawn",
+	}
+
+	// Simulate kubelet assigning the pod an IP.
+	go func() {
+		for i := 0; i < 100; i++ {
+			time.Sleep(20 * time.Millisecond)
+			pod, err := cs.CoreV1().Pods(cfg.Namespace).Get(context.Background(), PodName(spec.SessionID), metav1.GetOptions{})
+			if err != nil || pod.Status.Phase != "" {
+				continue
+			}
+			pod.Status.Phase = corev1.PodRunning
+			pod.Status.PodIP = "10.42.0.61"
+			_, _ = cs.CoreV1().Pods(cfg.Namespace).UpdateStatus(context.Background(), pod, metav1.UpdateOptions{})
+			return
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := spawner.Spawn(ctx, spec); err != nil {
+		t.Fatalf("Spawn with AlreadyExists secret Create failed: %v", err)
+	}
+	// The concurrent secret's content must be preserved (not clobbered by
+	// this Spawn's token): the pod reads it at container start.
+	sec, err := cs.CoreV1().Secrets(cfg.Namespace).Get(ctx, TokenSecretName(spec.SessionID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get token secret: %v", err)
+	}
+	if string(sec.Data["token"]) != "tok-other-gen" {
+		t.Fatalf("secret token = %q, want the concurrent tok-other-gen preserved", string(sec.Data["token"]))
+	}
+	if len(sec.OwnerReferences) != 1 || sec.OwnerReferences[0].Kind != "Pod" || sec.OwnerReferences[0].Name != PodName(spec.SessionID) {
+		t.Fatalf("secret owner refs = %+v, want exactly one Pod ref for GC", sec.OwnerReferences)
+	}
+}
+
 func TestReplacingMarkRefcountsOverlappingSpawns(t *testing.T) {
 	spawner := NewPodSpawner(fake.NewSimpleClientset(), PodConfig{Namespace: "interactive-sessions"}.WithDefaults(), nil)
 	sessionID := "sess-refcount"
