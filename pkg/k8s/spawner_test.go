@@ -3,13 +3,16 @@ package k8s
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	fstesting "k8s.io/client-go/testing"
 
 	"github.com/wrossmorrow/k8s-agents/pkg/hub"
 	"github.com/wrossmorrow/k8s-agents/pkg/sessions"
@@ -295,6 +298,87 @@ func TestWatchExitIgnoresReplacedPodGeneration(t *testing.T) {
 	case id := <-exitCh:
 		t.Fatalf("onExit fired for replaced pod generation: %s", id)
 	case <-time.After(4 * time.Second):
+	}
+}
+
+func TestWatchExitStaysSilentDuringInFlightReplacement(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
+	exitCh := make(chan string, 1)
+	spawner := NewPodSpawner(cs, cfg, func(id string) { exitCh <- id })
+	spawner.exitPoll = 50 * time.Millisecond
+
+	sessionID := "sess-replace-gap"
+	podName := PodName(sessionID)
+	// No pod exists: the old generation's watcher is in the delete->create
+	// gap of a replacement that Spawn is currently performing.
+	spawner.markReplacing(sessionID)
+	defer spawner.unmarkReplacing(sessionID)
+	go spawner.watchExit(sessionID, podName, types.UID("uid-old-gen"))
+
+	// Many more than two ticks elapse while the replacement is in flight;
+	// the stale watcher must stay silent even though the pod is missing.
+	select {
+	case id := <-exitCh:
+		t.Fatalf("onExit fired while replacement in flight: %s", id)
+	case <-time.After(1 * time.Second):
+	}
+
+	// Once the replacement mark is cleared (spawn failed / returned), the
+	// watcher must report the exit on the next debounced ticks.
+	spawner.unmarkReplacing(sessionID)
+	select {
+	case id := <-exitCh:
+		if id != sessionID {
+			t.Fatalf("onExit = %s, want %s", id, sessionID)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("onExit did not fire after replacement mark cleared")
+	}
+}
+
+func TestSpawnFailsClearlyWhenStalePodSurvivesForceDelete(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	// Simulate a stuck deletion (finalizer / slow sidecar teardown): pod
+	// Delete calls are acknowledged but the pod object stays behind.
+	cs.PrependReactor("delete", "pods", func(action fstesting.Action) (bool, runtime.Object, error) {
+		return true, nil, nil
+	})
+	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
+	spawner := NewPodSpawner(cs, cfg, nil)
+	spawner.skipHealthCheck = true
+	spawner.deleteWait = 300 * time.Millisecond
+
+	spec := hub.SpawnSpec{
+		SessionID:   "sess-stuck-delete",
+		SessionKind: sessions.KindInteractive,
+		Toolchain:   "golang",
+		HubURL:      "http://session-hub.session-system.svc.cluster.local:8787",
+		HubToken:    "tok-stuck",
+	}
+	stalePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: PodName(spec.SessionID), Namespace: cfg.Namespace, UID: types.UID("uid-stuck")},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.42.0.77",
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "agent", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+			},
+		},
+	}
+	if _, err := cs.CoreV1().Pods(cfg.Namespace).Create(context.Background(), stalePod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create stale pod: %v", err)
+	}
+
+	_, err := spawner.Spawn(context.Background(), spec)
+	if err == nil {
+		t.Fatal("Spawn succeeded, want a clear error while the stale pod still holds the name")
+	}
+	if !strings.Contains(err.Error(), "still exists after force-delete") {
+		t.Fatalf("error = %q, want a clear force-delete message", err)
+	}
+	if spawner.isReplacing(spec.SessionID) {
+		t.Fatal("replacement mark leaked after failed Spawn")
 	}
 }
 

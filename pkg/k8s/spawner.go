@@ -27,15 +27,23 @@ type PodSpawner struct {
 
 	mu        sync.RWMutex
 	endpoints map[string]string // sessionID -> http://<podIP>:<port>
+	replacing map[string]bool   // sessionID -> Spawn is mid delete->create replacement
+
+	// Polling tunables, overridable in unit tests.
+	exitPoll   time.Duration // watchExit poll interval
+	deleteWait time.Duration // waitDeleted deadline
 }
 
 // NewPodSpawner constructs a Kubernetes PodSpawner.
 func NewPodSpawner(client kubernetes.Interface, cfg PodConfig, onExit func(sessionID string)) *PodSpawner {
 	return &PodSpawner{
-		client:    client,
-		cfg:       cfg.WithDefaults(),
-		onExit:    onExit,
-		endpoints: map[string]string{},
+		client:     client,
+		cfg:        cfg.WithDefaults(),
+		onExit:     onExit,
+		endpoints:  map[string]string{},
+		replacing:  map[string]bool{},
+		exitPoll:   3 * time.Second,
+		deleteWait: 45 * time.Second,
 	}
 }
 
@@ -83,9 +91,24 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 			p.setEndpoint(spec.SessionID, ep)
 			return ep, nil
 		}
+		// Mark the replacement in flight so the old generation's watchExit
+		// does not report exit during the delete->create name gap (which
+		// can outlast its NotFound debounce under API latency); cleared
+		// whenever this Spawn returns.
+		p.markReplacing(spec.SessionID)
+		defer p.unmarkReplacing(spec.SessionID)
+
 		graceZero := int64(0)
-		_ = p.client.CoreV1().Pods(ns).Delete(ctx, podName, metav1.DeleteOptions{GracePeriodSeconds: &graceZero})
+		if derr := p.client.CoreV1().Pods(ns).Delete(ctx, podName, metav1.DeleteOptions{GracePeriodSeconds: &graceZero}); derr != nil && !apierrors.IsNotFound(derr) {
+			log.Printf("force-delete stale sandbox pod %s: %v", podName, derr)
+		}
 		p.waitDeleted(ctx, podName)
+		// waitDeleted is a bounded best-effort wait; if the old pod still
+		// holds the name, fail with a clear cause instead of a confusing
+		// AlreadyExists from the Create below.
+		if remaining, gerr := p.client.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{}); gerr == nil {
+			return "", fmt.Errorf("stale sandbox pod %s (phase %s) still exists after force-delete; retry once the deletion completes", podName, remaining.Status.Phase)
+		}
 	}
 
 	// Create or replace the per-session scoped bearer token Secret.
@@ -262,6 +285,27 @@ func (p *PodSpawner) clearEndpoint(sessionID string) {
 	p.mu.Unlock()
 }
 
+// markReplacing, unmarkReplacing, and isReplacing track whether Spawn is mid
+// delete->create replacement for a session, so the old pod generation's
+// watchExit can distinguish an intentional replacement gap from a real exit.
+func (p *PodSpawner) markReplacing(sessionID string) {
+	p.mu.Lock()
+	p.replacing[sessionID] = true
+	p.mu.Unlock()
+}
+
+func (p *PodSpawner) unmarkReplacing(sessionID string) {
+	p.mu.Lock()
+	delete(p.replacing, sessionID)
+	p.mu.Unlock()
+}
+
+func (p *PodSpawner) isReplacing(sessionID string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.replacing[sessionID]
+}
+
 func (p *PodSpawner) waitPodIP(ctx context.Context, podName string) (string, error) {
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
@@ -289,7 +333,7 @@ func (p *PodSpawner) waitPodIP(ctx context.Context, podName string) (string, err
 func (p *PodSpawner) waitDeleted(ctx context.Context, podName string) {
 	// Deadline runs past the default 30s pod termination grace period so a
 	// slow sidecar exit does not leave the pod name held when Spawn creates.
-	deadline := time.NewTimer(45 * time.Second)
+	deadline := time.NewTimer(p.deleteWait)
 	defer deadline.Stop()
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
@@ -314,7 +358,7 @@ func (p *PodSpawner) waitDeleted(ctx context.Context, podName string) {
 // this stale watcher stops silently.
 func (p *PodSpawner) watchExit(sessionID, podName string, podUID types.UID) {
 	missing := 0
-	tick := time.NewTicker(3 * time.Second)
+	tick := time.NewTicker(p.exitPoll)
 	defer tick.Stop()
 	for range tick.C {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -327,6 +371,12 @@ func (p *PodSpawner) watchExit(sessionID, podName string, podUID types.UID) {
 				return
 			}
 			missing = 0
+			if p.isReplacing(sessionID) {
+				// A replacement is in flight for this session; the new
+				// generation gets its own watcher on success, so stay silent
+				// instead of reporting the old generation's exit.
+				continue
+			}
 			if podAgentTerminated(pod) {
 				p.clearEndpoint(sessionID)
 				if p.onExit != nil {
@@ -337,8 +387,13 @@ func (p *PodSpawner) watchExit(sessionID, podName string, podUID types.UID) {
 			continue
 		}
 		if apierrors.IsNotFound(err) {
-			// Confirm on the next tick: the pod may be in the brief
-			// delete->create gap of a replacement by Spawn.
+			// The pod may be in the delete->create gap of a replacement by
+			// Spawn, which can outlast the debounce below under API latency.
+			if p.isReplacing(sessionID) {
+				missing = 0
+				continue
+			}
+			// Confirm on the next tick.
 			missing++
 			if missing < 2 {
 				continue
