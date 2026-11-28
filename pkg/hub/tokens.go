@@ -4,19 +4,26 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"strings"
 	"sync"
 )
 
 // TokenManager issues and verifies per-session scoped bearer tokens so each
 // pi-sessiond sandbox can only access its own session's objects on session-hub.
+// It also manages separate read-only analyst tokens for /internal/analyst/*.
 type TokenManager struct {
-	mu     sync.RWMutex
-	tokens map[string]string // sessionID -> token
-	lookup func(sessionID string) (string, bool)
+	mu            sync.RWMutex
+	tokens        map[string]string // sessionID -> write-scoped session token
+	analystTokens map[string]string // sessionID -> read-only analyst token
+	lookup        func(sessionID string) (string, bool)
+	analystLookup func(sessionID string) (string, bool)
 }
 
 func NewTokenManager() *TokenManager {
-	return &TokenManager{tokens: map[string]string{}}
+	return &TokenManager{
+		tokens:        map[string]string{},
+		analystTokens: map[string]string{},
+	}
 }
 
 // SetLookup configures an optional durable fallback (e.g. reading a per-session
@@ -26,6 +33,70 @@ func (m *TokenManager) SetLookup(fn func(sessionID string) (string, bool)) {
 	m.mu.Lock()
 	m.lookup = fn
 	m.mu.Unlock()
+}
+
+// SetAnalystLookup configures an optional durable fallback (e.g. direct Get of
+// the per-session Kubernetes Secret by sessionID) for verifying read-only
+// analyst tokens after a session-hub restart without requiring Secret list RBAC.
+func (m *TokenManager) SetAnalystLookup(fn func(sessionID string) (string, bool)) {
+	m.mu.Lock()
+	m.analystLookup = fn
+	m.mu.Unlock()
+}
+
+// IssueAnalyst returns a freshly generated read-only bearer token for an
+// analyst session in the format "an_<sessionID>.<hex>". This token is distinct
+// from the per-session write token and is accepted only on /internal/analyst/*
+// read endpoints.
+func (m *TokenManager) IssueAnalyst(sessionID string) string {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	tok := "an_" + sessionID + "." + hex.EncodeToString(b)
+	m.mu.Lock()
+	m.analystTokens[sessionID] = tok
+	m.mu.Unlock()
+	return tok
+}
+
+func parseAnalystTokenSessionID(token string) (string, bool) {
+	rest, ok := strings.CutPrefix(token, "an_")
+	if !ok {
+		return "", false
+	}
+	sessionID, secret, ok := strings.Cut(rest, ".")
+	if !ok || sessionID == "" || secret == "" {
+		return "", false
+	}
+	return sessionID, true
+}
+
+// VerifyAnalyst reports whether token is a valid read-only analyst token.
+func (m *TokenManager) VerifyAnalyst(token string) bool {
+	if token == "" {
+		return false
+	}
+	m.mu.RLock()
+	for _, want := range m.analystTokens {
+		if subtle.ConstantTimeCompare([]byte(want), []byte(token)) == 1 {
+			m.mu.RUnlock()
+			return true
+		}
+	}
+	lookup := m.analystLookup
+	m.mu.RUnlock()
+	if lookup != nil {
+		if sessionID, ok := parseAnalystTokenSessionID(token); ok {
+			if recovered, found := lookup(sessionID); found && recovered != "" {
+				if subtle.ConstantTimeCompare([]byte(recovered), []byte(token)) == 1 {
+					m.mu.Lock()
+					m.analystTokens[sessionID] = recovered
+					m.mu.Unlock()
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // Issue returns a freshly generated bearer token bound exclusively to sessionID.
@@ -72,9 +143,10 @@ func (m *TokenManager) Verify(sessionID, token string) bool {
 	return subtle.ConstantTimeCompare([]byte(want), []byte(token)) == 1
 }
 
-// Revoke removes the active token for sessionID.
+// Revoke removes the active tokens for sessionID.
 func (m *TokenManager) Revoke(sessionID string) {
 	m.mu.Lock()
 	delete(m.tokens, sessionID)
+	delete(m.analystTokens, sessionID)
 	m.mu.Unlock()
 }

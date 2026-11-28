@@ -87,13 +87,15 @@ func main() {
 
 	// Clone the target GitHub repo (if configured and not yet present) before
 	// rehydrating workspace.bundle so unpushed commits and dirty edits apply
-	// cleanly on top of the cloned repository.
-	if repo := strings.TrimSpace(os.Getenv("GITHUB_REPO")); repo != "" {
-		cloneCtx, cloneCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		if err := workspace.EnsureCloned(cloneCtx, workDir, repo, os.Getenv("GITHUB_BRANCH")); err != nil {
-			log.Printf("clone repo %s warning: %v", repo, err)
+	// cleanly on top of the cloned repository. Analyst sessions have zero repo access.
+	if sessionKind != sessions.KindAnalyst {
+		if repo := strings.TrimSpace(os.Getenv("GITHUB_REPO")); repo != "" {
+			cloneCtx, cloneCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			if err := workspace.EnsureCloned(cloneCtx, workDir, repo, os.Getenv("GITHUB_BRANCH")); err != nil {
+				log.Printf("clone repo %s warning: %v", repo, err)
+			}
+			cloneCancel()
 		}
-		cloneCancel()
 	}
 
 	// Rehydrate existing transcript + workspace.bundle + upload offset if this
@@ -138,13 +140,23 @@ func main() {
 	}
 
 	// Scrub hub/gateway/cloud tokens before exec'ing pi so bash tool calls
-	// inside the sandbox cannot read them.
-	piEnv := piconfig.ScrubEnv(os.Environ(), map[string]string{
+	// inside the sandbox cannot read them. Analyst sessions receive ONLY their
+	// separate read-only SESSION_ANALYST_URL / SESSION_ANALYST_TOKEN.
+	extraEnv := map[string]string{
 		"PI_CODING_AGENT_DIR": agentDir,
 		"SESSION_ID":          sessionID,
 		"SESSION_NAME":        sessionName,
 		"SESSION_KIND":        string(sessionKind),
-	})
+	}
+	if sessionKind == sessions.KindAnalyst {
+		if u := strings.TrimSpace(os.Getenv("SESSION_ANALYST_URL")); u != "" {
+			extraEnv["SESSION_ANALYST_URL"] = u
+		}
+		if t := strings.TrimSpace(os.Getenv("SESSION_ANALYST_TOKEN")); t != "" {
+			extraEnv["SESSION_ANALYST_TOKEN"] = t
+		}
+	}
+	piEnv := piconfig.ScrubEnv(os.Environ(), extraEnv)
 
 	rpc := pirpc.NewClient(piBin, piArgs, piEnv, workDir)
 	if err := rpc.Start(); err != nil {

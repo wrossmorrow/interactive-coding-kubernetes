@@ -12,21 +12,23 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wrossmorrow/k8s-agents/pkg/piconfig"
 	"github.com/wrossmorrow/k8s-agents/pkg/sessions"
 )
 
 // SpawnSpec describes the runtime parameters for launching a pi-sessiond instance.
 type SpawnSpec struct {
-	SessionID   string
-	SessionName string
-	SessionKind sessions.Kind
-	Repo        string
-	Branch      string
-	Toolchain   string
-	Provider    string
-	Model       string
-	HubURL      string
-	HubToken    string
+	SessionID    string
+	SessionName  string
+	SessionKind  sessions.Kind
+	Repo         string
+	Branch       string
+	Toolchain    string
+	Provider     string
+	Model        string
+	HubURL       string
+	HubToken     string
+	AnalystToken string
 }
 
 // Spawner abstracts sandbox lifecycle management (LocalSpawner in Milestone 1,
@@ -42,17 +44,18 @@ type Spawner interface {
 
 // LocalSpawnerConfig configures LocalSpawner for local dev and E2E tests.
 type LocalSpawnerConfig struct {
-	SessiondBin      string
-	WorkRoot         string
-	PiBin            string
-	PiArgs           string
-	AgentsMDPath     string
-	ModelCatalogPath string
-	GatewayURL       string
-	GatewayToken     string
-	FlushIntervalSec int
-	IdlePauseSec     int
-	OnExit           func(sessionID string)
+	SessiondBin         string
+	WorkRoot            string
+	PiBin               string
+	PiArgs              string
+	AgentsMDPath        string
+	AnalystAgentsMDPath string
+	ModelCatalogPath    string
+	GatewayURL          string
+	GatewayToken        string
+	FlushIntervalSec    int
+	IdlePauseSec        int
+	OnExit              func(sessionID string)
 }
 
 type localProc struct {
@@ -102,7 +105,9 @@ func (l *LocalSpawner) Spawn(ctx context.Context, spec SpawnSpec) (string, error
 	}
 	agentDir := filepath.Join(workRoot, ".agent-"+spec.SessionID)
 
-	env := append([]string(nil), os.Environ()...)
+	// Scrub hub/cloud/GitHub credentials from the inherited environment so local
+	// pi-sessiond and pi subprocesses never inherit session-hub secrets.
+	env := piconfig.ScrubEnv(os.Environ(), nil)
 	env = append(env,
 		"SESSION_ID="+spec.SessionID,
 		"SESSION_NAME="+spec.SessionName,
@@ -115,6 +120,12 @@ func (l *LocalSpawner) Spawn(ctx context.Context, spec SpawnSpec) (string, error
 		"PI_AGENT_DIR="+agentDir,
 		"TOOLCHAIN="+spec.Toolchain,
 	)
+	if spec.AnalystToken != "" {
+		env = append(env,
+			"SESSION_ANALYST_URL="+spec.HubURL,
+			"SESSION_ANALYST_TOKEN="+spec.AnalystToken,
+		)
+	}
 	if l.cfg.PiBin != "" {
 		env = append(env, "PI_BIN="+l.cfg.PiBin)
 	}
@@ -127,8 +138,17 @@ func (l *LocalSpawner) Spawn(ctx context.Context, spec SpawnSpec) (string, error
 	if spec.Model != "" {
 		env = append(env, "PI_MODEL="+spec.Model)
 	}
-	if l.cfg.AgentsMDPath != "" {
-		env = append(env, "PI_AGENTS_MD="+l.cfg.AgentsMDPath)
+	var agentsMD string
+	if spec.SessionKind == sessions.KindAnalyst {
+		agentsMD = l.cfg.AnalystAgentsMDPath
+	} else {
+		agentsMD = l.cfg.AgentsMDPath
+	}
+	if agentsMD != "" {
+		if abs, err := filepath.Abs(agentsMD); err == nil {
+			agentsMD = abs
+		}
+		env = append(env, "PI_AGENTS_MD="+agentsMD)
 	}
 	if l.cfg.ModelCatalogPath != "" {
 		env = append(env, "PI_MODEL_CATALOG="+l.cfg.ModelCatalogPath)

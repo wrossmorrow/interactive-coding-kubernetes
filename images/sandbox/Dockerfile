@@ -18,6 +18,7 @@ USER root
 COPY --from=pi-sessiond-build /pi-sessiond /usr/local/bin/pi-sessiond
 COPY ext/session-attribution/ /opt/pi-ext/session-attribution/
 COPY agents/base.md /opt/agents/base.md
+COPY agents/analyst.md /opt/agents/analyst.md
 RUN mkdir -p /work/repo \
     && chown -R node:node /work /opt/pi-ext /opt/agents
 

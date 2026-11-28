@@ -5,10 +5,16 @@ import "strings"
 var scrubbedExact = map[string]bool{
 	"SESSION_HUB_TOKEN":              true,
 	"SESSION_SINK_TOKEN":             true,
+	"SESSION_ANALYST_TOKEN":          true,
 	"AGENT_GATEWAY_TOKEN":            true,
 	"MOTHERDUCK_TOKEN":               true,
 	"GOOGLE_APPLICATION_CREDENTIALS": true,
 	"PI_SESSIOND_TOKEN":              true,
+	"GITHUB_TOKEN":                   true,
+	"GH_TOKEN":                       true,
+	"GITHUB_APP_ID":                  true,
+	"GITHUB_APP_INSTALLATION_ID":     true,
+	"GITHUB_APP_PRIVATE_KEY_PATH":    true,
 }
 
 var scrubbedPrefixes = []string{

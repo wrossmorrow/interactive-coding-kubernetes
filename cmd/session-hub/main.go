@@ -36,6 +36,8 @@ func main() {
 		sessiondBin      = flag.String("sessiond-bin", envOr("PI_SESSIOND_BIN", "pi-sessiond"), "path to pi-sessiond binary for LocalSpawner")
 		piBin            = flag.String("pi-bin", envOr("PI_BIN", "pi"), "pi binary passed to LocalSpawner")
 		piArgs           = flag.String("pi-args", os.Getenv("PI_ARGS"), "optional override args for pi")
+		agentsMD         = flag.String("agents-md", os.Getenv("PI_AGENTS_MD"), "optional AGENTS.md path for LocalSpawner interactive sessions")
+		analystAgentsMD  = flag.String("analyst-agents-md", envOr("PI_ANALYST_AGENTS_MD", existingFile("agents/analyst.md")), "optional AGENTS.md path for LocalSpawner analyst sessions")
 		modelCatalog     = flag.String("model-catalog", os.Getenv("PI_MODEL_CATALOG"), "optional JSON model catalog path")
 		archiveSinkToken = flag.String("archive-sink-token", os.Getenv("SESSION_SINK_TOKEN"), "bearer token accepted on POST /internal/archive for agentrunner CI archives")
 		allowedHosts     = flag.String("allowed-hosts", os.Getenv("SESSION_HUB_ALLOWED_HOSTS"), "comma-separated extra allowed Host headers")
@@ -87,9 +89,10 @@ func main() {
 	}
 
 	var (
-		srv         *hub.Server
-		spawner     hub.Spawner
-		tokenLookup func(string) (string, bool)
+		srv                *hub.Server
+		spawner            hub.Spawner
+		tokenLookup        func(string) (string, bool)
+		analystTokenLookup func(string) (string, bool)
 	)
 	onExit := func(id string) {
 		if srv != nil {
@@ -100,13 +103,15 @@ func main() {
 	switch strings.ToLower(strings.TrimSpace(*spawnerMode)) {
 	case "local":
 		spawner = hub.NewLocalSpawner(hub.LocalSpawnerConfig{
-			SessiondBin:      *sessiondBin,
-			WorkRoot:         *workDir,
-			PiBin:            *piBin,
-			PiArgs:           *piArgs,
-			ModelCatalogPath: *modelCatalog,
-			FlushIntervalSec: *flushIntervalSec,
-			OnExit:           onExit,
+			SessiondBin:         *sessiondBin,
+			WorkRoot:            *workDir,
+			PiBin:               *piBin,
+			PiArgs:              *piArgs,
+			AgentsMDPath:        *agentsMD,
+			AnalystAgentsMDPath: *analystAgentsMD,
+			ModelCatalogPath:    *modelCatalog,
+			FlushIntervalSec:    *flushIntervalSec,
+			OnExit:              onExit,
 		})
 	case "k8s":
 		clientset, err := buildKubeClient()
@@ -127,6 +132,7 @@ func main() {
 		}, onExit)
 		spawner = k8sSpawner
 		tokenLookup = k8sSpawner.LookupToken
+		analystTokenLookup = k8sSpawner.LookupAnalystToken
 	default:
 		log.Fatalf("unsupported --spawner=%q (want local or k8s)", *spawnerMode)
 	}
@@ -141,14 +147,15 @@ func main() {
 	}
 
 	srv = hub.NewServer(hub.Config{
-		Store:            store,
-		Spawner:          spawner,
-		Catalog:          cat,
-		UIFS:             ui.FS(),
-		HubBaseURL:       hubBaseURL,
-		ArchiveSinkToken: *archiveSinkToken,
-		TokenLookup:      tokenLookup,
-		AllowedHosts:     strings.Split(*allowedHosts, ","),
+		Store:              store,
+		Spawner:            spawner,
+		Catalog:            cat,
+		UIFS:               ui.FS(),
+		HubBaseURL:         hubBaseURL,
+		ArchiveSinkToken:   *archiveSinkToken,
+		TokenLookup:        tokenLookup,
+		AnalystTokenLookup: analystTokenLookup,
+		AllowedHosts:       strings.Split(*allowedHosts, ","),
 	})
 
 	if *wakeupInterval > 0 {
@@ -219,4 +226,11 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func existingFile(path string) string {
+	if st, err := os.Stat(path); err == nil && !st.IsDir() {
+		return path
+	}
+	return ""
 }

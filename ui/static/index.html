@@ -85,9 +85,15 @@
 
 <div id="modal-backdrop" hidden>
   <form id="new-modal">
-    <div class="modal-title">New Interactive Session</div>
+    <div class="modal-title">New Session</div>
+    <label>Mode
+      <select id="nm-kind">
+        <option value="interactive">interactive (coding sandbox)</option>
+        <option value="analyst">analyst (read-only session archive)</option>
+      </select>
+    </label>
     <label>Name <input id="nm-name" type="text" placeholder="e.g. fix-auth-retry"></label>
-    <label>Repo <input id="nm-repo" type="text" placeholder="owner/repo (optional)"></label>
+    <label id="nm-repo-wrap">Repo <input id="nm-repo" type="text" placeholder="owner/repo (optional)"></label>
     <label>Toolchain
       <select id="nm-toolchain">
         <option value="agent">agent (base)</option>

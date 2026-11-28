@@ -51,12 +51,25 @@ func TestBuildSandboxPodTopologyAndIsolation(t *testing.T) {
 		t.Fatalf("unexpected main container: %+v", pod.Spec.Containers)
 	}
 
-	// Verify analyst sessions omit github-auth sidecar (zero repo write access).
+	// Verify analyst sessions omit github-auth sidecar and wire analyst AGENTS.md + read-only token.
 	analystSpec := spec
 	analystSpec.SessionKind = sessions.KindAnalyst
+	analystSpec.AnalystToken = "an_test_tok"
 	analystPod := BuildSandboxPod(cfg, analystSpec)
 	if len(analystPod.Spec.InitContainers) != 1 || analystPod.Spec.InitContainers[0].Name != "egress-proxy" {
 		t.Fatalf("analyst pod should only have egress-proxy sidecar, got %+v", analystPod.Spec.InitContainers)
+	}
+	var hasAnalystMD, hasAnalystTok bool
+	for _, ev := range analystPod.Spec.Containers[0].Env {
+		if ev.Name == "PI_AGENTS_MD" && ev.Value == "/opt/agents/analyst.md" {
+			hasAnalystMD = true
+		}
+		if ev.Name == "SESSION_ANALYST_TOKEN" && ev.ValueFrom != nil && ev.ValueFrom.SecretKeyRef != nil && ev.ValueFrom.SecretKeyRef.Key == "analyst-token" {
+			hasAnalystTok = true
+		}
+	}
+	if !hasAnalystMD || !hasAnalystTok {
+		t.Fatalf("analyst pod missing expected env vars (hasAnalystMD=%v, hasAnalystTok=%v)", hasAnalystMD, hasAnalystTok)
 	}
 }
 
@@ -141,5 +154,62 @@ func TestPodSpawnerLifecycleAndRediscovery(t *testing.T) {
 	}
 	if spawner2.Running(spec.SessionID) {
 		t.Fatal("expected Running=false after Stop")
+	}
+}
+
+func TestBuildTokenSecretAndLookupAnalystToken(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
+	spawner := NewPodSpawner(cs, cfg, nil)
+	ctx := context.Background()
+
+	// Defense in depth: non-analyst sessions must never get analyst-token even if passed one.
+	interactiveSec := BuildTokenSecret(cfg.Namespace, "sess-int-1", sessions.KindInteractive, "hub-tok-int", "spurious-analyst-tok")
+	if _, ok := interactiveSec.Labels[LabelKind]; ok {
+		t.Fatalf("interactive secret should not carry analyst label, got %q", interactiveSec.Labels[LabelKind])
+	}
+	if _, ok := interactiveSec.Data["analyst-token"]; ok {
+		t.Fatal("interactive secret should not carry analyst-token")
+	}
+
+	analystTok := "an_sess-an-1.deadbeef"
+	analystSec := BuildTokenSecret(cfg.Namespace, "sess-an-1", sessions.KindAnalyst, "hub-tok-an", analystTok)
+	if analystSec.Labels[LabelKind] != string(sessions.KindAnalyst) {
+		t.Fatalf("analyst secret label = %q, want %q", analystSec.Labels[LabelKind], sessions.KindAnalyst)
+	}
+	if got := string(analystSec.Data["analyst-token"]); got != analystTok {
+		t.Fatalf("analyst secret Data[analyst-token] = %q, want %q", got, analystTok)
+	}
+
+	for _, sec := range []*corev1.Secret{interactiveSec, analystSec} {
+		if _, err := cs.CoreV1().Secrets(cfg.Namespace).Create(ctx, sec, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create secret %s: %v", sec.Name, err)
+		}
+	}
+
+	if got, ok := spawner.LookupAnalystToken("sess-an-1"); !ok || got != analystTok {
+		t.Fatalf("LookupAnalystToken(sess-an-1) = (%q, %v), want (%q, true)", got, ok, analystTok)
+	}
+	if got, ok := spawner.LookupAnalystToken("sess-int-1"); ok || got != "" {
+		t.Fatalf("LookupAnalystToken(sess-int-1) = (%q, %v), want (\"\", false)", got, ok)
+	}
+	if got, ok := spawner.LookupAnalystToken("sess-missing"); ok || got != "" {
+		t.Fatalf("LookupAnalystToken(sess-missing) = (%q, %v), want (\"\", false)", got, ok)
+	}
+	if got, ok := spawner.LookupAnalystToken(""); ok || got != "" {
+		t.Fatalf("LookupAnalystToken(\"\") = (%q, %v), want (\"\", false)", got, ok)
+	}
+
+	// Verify TokenManager integrates with LookupAnalystToken for post-restart verification.
+	tm := hub.NewTokenManager()
+	tm.SetAnalystLookup(spawner.LookupAnalystToken)
+	if !tm.VerifyAnalyst(analystTok) {
+		t.Fatal("TokenManager.VerifyAnalyst should accept valid analyst token via LookupAnalystToken")
+	}
+	if tm.VerifyAnalyst("an_sess-an-1.wrongsecret") {
+		t.Fatal("TokenManager.VerifyAnalyst should reject wrong secret for valid analyst session")
+	}
+	if tm.VerifyAnalyst("hub-tok-int") {
+		t.Fatal("TokenManager.VerifyAnalyst should reject interactive hub token")
 	}
 }
