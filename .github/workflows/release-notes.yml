@@ -25,9 +25,19 @@ jobs:
     runs-on: interactive-coding-kubernetes-release
     timeout-minutes: 15
     steps:
+      - id: validate
+        env:
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if [[ ! "${RAW_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid release tag format: ${RAW_TAG}"
+            exit 1
+          fi
+          echo "tag=${RAW_TAG}" >> "${GITHUB_OUTPUT}"
+
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: refs/tags/${{ steps.validate.outputs.tag }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -35,10 +45,10 @@ jobs:
         with:
           instructions: |
             Inspect the commits and actual code diff between the previous release tag
-            and ${{ inputs.tag || github.ref_name }}, and draft clean Markdown release notes
+            and ${{ steps.validate.outputs.tag }}, and draft clean Markdown release notes
             grouped into Highlights, Features, Bug Fixes, and Docs/CI. Verify every
             referenced Helm value, CLI flag, HTTP endpoint, and UI control against
-            the actual repository state at ${{ inputs.tag || github.ref_name }}.
+            the actual repository state at ${{ steps.validate.outputs.tag }}.
           fail-on: none
           output: release-draft
-          tag: ${{ inputs.tag || github.ref_name }}
+          tag: ${{ steps.validate.outputs.tag }}
