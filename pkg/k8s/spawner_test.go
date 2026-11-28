@@ -866,6 +866,51 @@ func TestSpawnReusesConcurrentSecretOnCreateAlreadyExists(t *testing.T) {
 	}
 }
 
+func TestSpawnPodCreateFailureKeepsReusedSecret(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
+	tracker := cs.Tracker()
+	cs.PrependReactor("create", "secrets", func(action fstesting.Action) (bool, runtime.Object, error) {
+		concurrent := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: TokenSecretName("sess-pod-fail"), Namespace: cfg.Namespace},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{"token": []byte("tok-other-gen")},
+		}
+		_ = tracker.Add(concurrent)
+		return true, nil, apierrors.NewAlreadyExists(corev1.Resource("secrets"), concurrent.Name)
+	})
+	cs.PrependReactor("create", "pods", func(action fstesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewInternalError(fmt.Errorf("api server unavailable"))
+	})
+	spawner := NewPodSpawner(cs, cfg, nil)
+
+	spec := hub.SpawnSpec{
+		SessionID:   "sess-pod-fail",
+		SessionKind: sessions.KindInteractive,
+		Toolchain:   "golang",
+		HubURL:      "http://session-hub.session-system.svc.cluster.local:8787",
+		HubToken:    "tok-this-spawn",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := spawner.Spawn(ctx, spec); err == nil {
+		t.Fatal("Spawn succeeded, want the pod Create failure to surface")
+	} else if !strings.Contains(err.Error(), "api server unavailable") {
+		t.Fatalf("error = %q, want the pod Create failure", err)
+	}
+	// The secret was reused from the concurrent Spawn, so the failed pod
+	// Create must not delete it (it may be bound to a healthy concurrent
+	// pod that authenticates against it).
+	sec, err := cs.CoreV1().Secrets(cfg.Namespace).Get(ctx, TokenSecretName(spec.SessionID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("token secret after failed pod Create: %v, want kept (reused, not ours)", err)
+	}
+	if string(sec.Data["token"]) != "tok-other-gen" {
+		t.Fatalf("secret token = %q, want tok-other-gen intact", string(sec.Data["token"]))
+	}
+}
+
 func TestReplacingMarkRefcountsOverlappingSpawns(t *testing.T) {
 	spawner := NewPodSpawner(fake.NewSimpleClientset(), PodConfig{Namespace: "interactive-sessions"}.WithDefaults(), nil)
 	sessionID := "sess-refcount"

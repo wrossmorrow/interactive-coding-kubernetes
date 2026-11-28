@@ -134,6 +134,7 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 	sec := BuildTokenSecret(ns, spec.SessionID, spec.SessionKind, spec.HubToken, spec.AnalystToken)
 	_ = p.client.CoreV1().Secrets(ns).Delete(ctx, sec.Name, metav1.DeleteOptions{})
 	createdSec, err := p.client.CoreV1().Secrets(ns).Create(ctx, sec, metav1.CreateOptions{})
+	createdByUs := true
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			// A concurrent Spawn (re)created the secret between our Delete
@@ -145,6 +146,7 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 			if err != nil {
 				return "", fmt.Errorf("read concurrent session token secret: %w", err)
 			}
+			createdByUs = false
 		} else {
 			return "", fmt.Errorf("create session token secret: %w", err)
 		}
@@ -177,7 +179,13 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 			}
 			return ep, nil
 		}
-		_ = p.client.CoreV1().Secrets(ns).Delete(context.Background(), sec.Name, metav1.DeleteOptions{})
+		// Only clean up a secret this Spawn created: if the Create was
+		// served by the reuse branch above, the secret belongs to the
+		// concurrent Spawn (and may be bound to its healthy pod), so
+		// deleting it here would brick its bearer auth.
+		if createdByUs {
+			_ = p.client.CoreV1().Secrets(ns).Delete(context.Background(), sec.Name, metav1.DeleteOptions{})
+		}
 		return "", fmt.Errorf("create sandbox pod: %w", err)
 	}
 
