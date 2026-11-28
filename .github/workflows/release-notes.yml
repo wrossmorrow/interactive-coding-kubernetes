@@ -1,0 +1,44 @@
+name: Draft Release Notes
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to draft notes for (e.g. v0.0.7)
+        required: true
+        type: string
+
+# GITHUB_TOKEN only needs read for checkout; the `release-bot` GitHub App
+# mounted via github-auth mints the `Contents: Read & write` token for drafts.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-notes-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  draft-release:
+    runs-on: interactive-coding-kubernetes-release
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: wrossmorrow/github-agent-runner/action@v0.0.13
+        with:
+          instructions: |
+            Inspect the commits and actual code diff between the previous release tag
+            and ${{ inputs.tag || github.ref_name }}, and draft clean Markdown release notes
+            grouped into Highlights, Features, Bug Fixes, and Docs/CI. Verify every
+            referenced CRD field, CLI flag, endpoint, and Action input/output against
+            the actual repository state at ${{ inputs.tag || github.ref_name }}.
+          fail-on: none
+          output: release-draft
+          tag: ${{ inputs.tag || github.ref_name }}
