@@ -263,6 +263,41 @@ func TestAgentContainerTerminatedInRunningPod(t *testing.T) {
 	}
 }
 
+func TestWatchExitIgnoresReplacedPodGeneration(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
+	exitCh := make(chan string, 1)
+	spawner := NewPodSpawner(cs, cfg, func(id string) { exitCh <- id })
+
+	spec := hub.SpawnSpec{SessionID: "sess-replaced-watcher"}
+	podName := PodName(spec.SessionID)
+
+	// The pod now occupying the name is a different generation (new UID)
+	// whose agent has already terminated.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: cfg.Namespace, UID: types.UID("uid-new-gen")},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.42.0.50",
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "agent", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+			},
+		},
+	}
+	if _, err := cs.CoreV1().Pods(cfg.Namespace).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create replaced pod: %v", err)
+	}
+
+	// The stale watcher (started for the old generation) must stop silently
+	// instead of firing onExit for the new generation.
+	go spawner.watchExit(spec.SessionID, podName, types.UID("uid-old-gen"))
+	select {
+	case id := <-exitCh:
+		t.Fatalf("onExit fired for replaced pod generation: %s", id)
+	case <-time.After(4 * time.Second):
+	}
+}
+
 func TestBuildTokenSecretAndLookupAnalystToken(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()

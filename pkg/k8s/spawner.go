@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/wrossmorrow/k8s-agents/pkg/hub"
@@ -127,7 +128,7 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 	}
 
 	p.setEndpoint(spec.SessionID, endpoint)
-	go p.watchExit(spec.SessionID, podName)
+	go p.watchExit(spec.SessionID, podName, createdPod.UID)
 	return endpoint, nil
 }
 
@@ -306,23 +307,49 @@ func (p *PodSpawner) waitDeleted(ctx context.Context, podName string) {
 	}
 }
 
-func (p *PodSpawner) watchExit(sessionID, podName string) {
+// watchExit polls the sandbox pod until the agent container exits or the pod
+// is deleted, then clears the endpoint and notifies onExit. It only reacts
+// to the pod generation it was started for (podUID): if Spawn has replaced
+// the pod, the name belongs to a new generation with its own watcher, and
+// this stale watcher stops silently.
+func (p *PodSpawner) watchExit(sessionID, podName string, podUID types.UID) {
+	missing := 0
 	tick := time.NewTicker(3 * time.Second)
 	defer tick.Stop()
 	for range tick.C {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		pod, err := p.client.CoreV1().Pods(p.cfg.Namespace).Get(ctx, podName, metav1.GetOptions{})
 		cancel()
-		if apierrors.IsNotFound(err) || (err == nil && podAgentTerminated(pod)) {
+		if err == nil {
+			if pod.UID != "" && podUID != "" && pod.UID != podUID {
+				// Pod name is now owned by a new generation; the new watcher
+				// owns exit handling for this session.
+				return
+			}
+			missing = 0
+			if podAgentTerminated(pod) {
+				p.clearEndpoint(sessionID)
+				if p.onExit != nil {
+					p.onExit(sessionID)
+				}
+				return
+			}
+			continue
+		}
+		if apierrors.IsNotFound(err) {
+			// Confirm on the next tick: the pod may be in the brief
+			// delete->create gap of a replacement by Spawn.
+			missing++
+			if missing < 2 {
+				continue
+			}
 			p.clearEndpoint(sessionID)
 			if p.onExit != nil {
 				p.onExit(sessionID)
 			}
 			return
 		}
-		if err != nil {
-			log.Printf("watch sandbox pod %s: %v", podName, err)
-		}
+		log.Printf("watch sandbox pod %s: %v", podName, err)
 	}
 }
 
