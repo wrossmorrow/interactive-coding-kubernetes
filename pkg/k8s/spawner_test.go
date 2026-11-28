@@ -213,3 +213,119 @@ func TestBuildTokenSecretAndLookupAnalystToken(t *testing.T) {
 		t.Fatal("TokenManager.VerifyAnalyst should reject interactive hub token")
 	}
 }
+
+func TestBuildSandboxPodResourceSizes(t *testing.T) {
+	cfg := PodConfig{}.WithDefaults()
+	cases := []struct {
+		name      string
+		kind      sessions.Kind
+		toolchain string
+		size      string
+		wantCPU   string
+		wantMem   string
+	}{
+		{"golang auto defaults to medium", sessions.KindInteractive, "golang", "", "2", "4Gi"},
+		{"rust auto defaults to medium", sessions.KindInteractive, "rust", "", "2", "4Gi"},
+		{"python auto defaults to small", sessions.KindInteractive, "python", "", "1", "2Gi"},
+		{"analyst auto defaults to small even on golang", sessions.KindAnalyst, "golang", "", "1", "2Gi"},
+		{"explicit small overrides golang", sessions.KindInteractive, "golang", sessions.SizeSmall, "1", "2Gi"},
+		{"explicit large", sessions.KindInteractive, "golang", sessions.SizeLarge, "4", "8Gi"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := BuildSandboxPod(cfg, hub.SpawnSpec{
+				SessionID:   "sess-size-1",
+				SessionKind: tc.kind,
+				Toolchain:   tc.toolchain,
+				Size:        tc.size,
+			})
+			req := pod.Spec.Containers[0].Resources.Requests
+			if got := req.Cpu().String(); got != tc.wantCPU {
+				t.Fatalf("cpu = %q, want %q", got, tc.wantCPU)
+			}
+			if got := req.Memory().String(); got != tc.wantMem {
+				t.Fatalf("memory = %q, want %q", got, tc.wantMem)
+			}
+		})
+	}
+}
+
+func TestPodSpawnerHandlesTerminatedAgentWithLiveSidecar(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
+	spawner := NewPodSpawner(cs, cfg, nil)
+	spawner.skipHealthCheck = true
+
+	sessionID := "sess-sidecar-1"
+	stalePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      PodName(sessionID),
+			Namespace: cfg.Namespace,
+			UID:       types.UID("uid-old"),
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.42.0.99",
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name: "agent",
+					State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"},
+					},
+				},
+			},
+		},
+	}
+	ctx := context.Background()
+	if _, err := cs.CoreV1().Pods(cfg.Namespace).Create(ctx, stalePod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create stale pod: %v", err)
+	}
+
+	// PodRunning with Terminated agent must NOT be considered running.
+	if spawner.Running(sessionID) {
+		t.Fatal("Running() = true for pod whose agent container terminated, want false")
+	}
+
+	// WaitExit must return immediately when agent container is already Terminated.
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	spawner.WaitExit(waitCtx, sessionID)
+	if waitCtx.Err() != nil {
+		t.Fatalf("WaitExit timed out on PodRunning with Terminated agent: %v", waitCtx.Err())
+	}
+
+	// Spawn must delete the stale pod and create a fresh pod with a new PodIP.
+	go func() {
+		for range 30 {
+			time.Sleep(25 * time.Millisecond)
+			pod, err := cs.CoreV1().Pods(cfg.Namespace).Get(context.Background(), PodName(sessionID), metav1.GetOptions{})
+			if err != nil || pod.UID == "uid-old" {
+				continue
+			}
+			pod.UID = types.UID("uid-new")
+			pod.Status.Phase = corev1.PodRunning
+			pod.Status.PodIP = "10.42.0.100"
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+				{Name: "agent", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			}
+			_, _ = cs.CoreV1().Pods(cfg.Namespace).UpdateStatus(context.Background(), pod, metav1.UpdateOptions{})
+			return
+		}
+	}()
+
+	spawnCtx, spawnCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer spawnCancel()
+	ep, err := spawner.Spawn(spawnCtx, hub.SpawnSpec{
+		SessionID:   sessionID,
+		SessionKind: sessions.KindInteractive,
+		Toolchain:   "golang",
+		HubURL:      "http://session-hub.session-system.svc.cluster.local:8787",
+		HubToken:    "tok-fresh",
+	})
+	if err != nil {
+		t.Fatalf("Spawn replacing terminated-agent pod failed: %v", err)
+	}
+	if ep != "http://10.42.0.100:8787" {
+		t.Fatalf("endpoint = %q, want http://10.42.0.100:8787", ep)
+	}
+}

@@ -24,6 +24,7 @@ type SpawnSpec struct {
 	Repo         string
 	Branch       string
 	Toolchain    string
+	Size         string
 	Provider     string
 	Model        string
 	HubURL       string

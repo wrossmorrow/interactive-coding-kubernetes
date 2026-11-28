@@ -880,6 +880,7 @@ $("#new-modal").addEventListener("submit", async (e) => {
     name: $("#nm-name").value.trim(),
     repo: kind === "analyst" ? "" : $("#nm-repo").value.trim(),
     toolchain: $("#nm-toolchain").value,
+    size: $("#nm-size").value,
     provider,
     model,
   };

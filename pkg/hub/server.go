@@ -255,12 +255,18 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		Repo      string        `json:"repo"`
 		Branch    string        `json:"branch"`
 		Toolchain string        `json:"toolchain"`
+		Size      string        `json:"size"`
 		Provider  string        `json:"provider"`
 		Model     string        `json:"model"`
 		Kind      sessions.Kind `json:"kind"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "bad request: " + err.Error()})
+		return
+	}
+	req.Size = strings.ToLower(strings.TrimSpace(req.Size))
+	if !sessions.ValidSize(req.Size) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "invalid size: want small, medium, or large"})
 		return
 	}
 	if req.Kind == "" {
@@ -302,6 +308,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		Repo:                   req.Repo,
 		Branch:                 req.Branch,
 		Toolchain:              req.Toolchain,
+		Size:                   req.Size,
 		WakePolicy:             wakePolicy,
 		MaxWakeupsPerHumanTurn: sessions.DefaultMaxWakeupsPerHumanTurn,
 		ModelConfig:            map[string]any{"provider": req.Provider, "modelId": req.Model},
@@ -326,6 +333,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		Repo:         req.Repo,
 		Branch:       req.Branch,
 		Toolchain:    req.Toolchain,
+		Size:         req.Size,
 		Provider:     req.Provider,
 		Model:        req.Model,
 		HubURL:       s.hubBaseURL,
@@ -447,6 +455,7 @@ func (s *Server) rejoinSession(ctx context.Context, meta *sessions.Metadata) (*s
 		Repo:         meta.Repo,
 		Branch:       meta.Branch,
 		Toolchain:    meta.Toolchain,
+		Size:         meta.Size,
 		Provider:     provider,
 		Model:        modelID,
 		HubURL:       s.hubBaseURL,
@@ -731,6 +740,7 @@ func (s *Server) handleForkSession(w http.ResponseWriter, r *http.Request) {
 		Repo:        srcMeta.Repo,
 		Branch:      srcMeta.Branch,
 		Toolchain:   srcMeta.Toolchain,
+		Size:        srcMeta.Size,
 		ForkedFrom:  srcID,
 		LastOffset:  int64(len(raw)),
 		PartCount:   partCount,
@@ -754,6 +764,7 @@ func (s *Server) handleForkSession(w http.ResponseWriter, r *http.Request) {
 		Repo:        meta.Repo,
 		Branch:      meta.Branch,
 		Toolchain:   meta.Toolchain,
+		Size:        meta.Size,
 		Provider:    provider,
 		Model:       modelID,
 		HubURL:      s.hubBaseURL,

@@ -71,9 +71,10 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 	ns := p.cfg.Namespace
 	podName := PodName(spec.SessionID)
 
-	// Clean up any prior completed/failed Pod from an earlier pause cycle.
+	// Clean up any prior completed/failed Pod (including Pods whose agent
+	// container terminated while a native sidecar is still shutting down).
 	if existing, err := p.client.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{}); err == nil {
-		if existing.Status.Phase == corev1.PodRunning && existing.Status.PodIP != "" {
+		if podAgentRunning(existing) {
 			ep := fmt.Sprintf("http://%s:%d", existing.Status.PodIP, p.cfg.SessiondPort)
 			p.setEndpoint(spec.SessionID, ep)
 			return ep, nil
@@ -141,7 +142,7 @@ func (p *PodSpawner) Endpoint(sessionID string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	if pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" && pod.DeletionTimestamp == nil {
+	if podAgentRunning(pod) {
 		ep = fmt.Sprintf("http://%s:%d", pod.Status.PodIP, p.cfg.SessiondPort)
 		p.setEndpoint(sessionID, ep)
 		return ep, true
@@ -164,7 +165,7 @@ func (p *PodSpawner) WaitExit(ctx context.Context, sessionID string) {
 			p.clearEndpoint(sessionID)
 			return
 		}
-		if err == nil && (pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed) {
+		if err == nil && podAgentTerminated(pod) {
 			p.clearEndpoint(sessionID)
 			return
 		}
@@ -288,7 +289,7 @@ func (p *PodSpawner) watchExit(sessionID, podName string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		pod, err := p.client.CoreV1().Pods(p.cfg.Namespace).Get(ctx, podName, metav1.GetOptions{})
 		cancel()
-		if apierrors.IsNotFound(err) || (err == nil && (pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed)) {
+		if apierrors.IsNotFound(err) || (err == nil && podAgentTerminated(pod)) {
 			p.clearEndpoint(sessionID)
 			if p.onExit != nil {
 				p.onExit(sessionID)
@@ -299,6 +300,33 @@ func (p *PodSpawner) watchExit(sessionID, podName string) {
 			log.Printf("watch sandbox pod %s: %v", podName, err)
 		}
 	}
+}
+
+// podAgentTerminated reports whether the pod has finished or its primary "agent"
+// container has terminated (even if native sidecars are still shutting down or
+// in CrashLoopBackOff, which keeps pod.Status.Phase == PodRunning).
+func podAgentTerminated(pod *corev1.Pod) bool {
+	if pod == nil {
+		return true
+	}
+	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+		return true
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "agent" && cs.State.Terminated != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// podAgentRunning reports whether the pod is live and its "agent" container has
+// not terminated.
+func podAgentRunning(pod *corev1.Pod) bool {
+	if pod == nil || pod.DeletionTimestamp != nil {
+		return false
+	}
+	return pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" && !podAgentTerminated(pod)
 }
 
 func waitPodHealthy(ctx context.Context, url string) error {
