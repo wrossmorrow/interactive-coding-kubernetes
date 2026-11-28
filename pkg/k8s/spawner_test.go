@@ -433,8 +433,10 @@ func TestSpawnAdoptsConcurrentReplacementPod(t *testing.T) {
 		t.Fatalf("create stale pod: %v", err)
 	}
 
-	// The concurrent replacement pod is still up when waitDeleted's deadline
-	// expires; Spawn must adopt it instead of failing with a stale-pod error.
+	// The concurrent replacement pod occupies the name while the stale pod
+	// is being deleted; waitDeleted must return early on the foreign UID
+	// and Spawn must adopt the replacement instead of failing with a
+	// stale-pod error.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	ep, err := spawner.Spawn(ctx, spec)
@@ -908,6 +910,69 @@ func TestSpawnPodCreateFailureKeepsReusedSecret(t *testing.T) {
 	}
 	if string(sec.Data["token"]) != "tok-other-gen" {
 		t.Fatalf("secret token = %q, want tok-other-gen intact", string(sec.Data["token"]))
+	}
+}
+
+func TestWaitDeletedReturnsEarlyOnForeignUID(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cfg := PodConfig{Namespace: "interactive-sessions"}.WithDefaults()
+	tracker := cs.Tracker()
+	cs.PrependReactor("delete", "pods", func(action fstesting.Action) (bool, runtime.Object, error) {
+		del := action.(fstesting.DeleteAction)
+		podsGVR := corev1.SchemeGroupVersion.WithResource("pods")
+		_ = tracker.Delete(podsGVR, cfg.Namespace, del.GetName())
+		concurrent := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: del.GetName(), Namespace: cfg.Namespace, UID: types.UID("uid-new-gen")},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.42.0.200",
+				ContainerStatuses: []corev1.ContainerStatus{
+					{Name: "agent", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+				},
+			},
+		}
+		_ = tracker.Add(concurrent)
+		return true, nil, nil
+	})
+	spawner := NewPodSpawner(cs, cfg, nil)
+	spawner.skipHealthCheck = true
+	// A long delete deadline: if waitDeleted does not return early on the
+	// foreign-UID pod, the short ctx below expires first and Spawn fails.
+	spawner.deleteWait = 30 * time.Second
+
+	spec := hub.SpawnSpec{
+		SessionID:   "sess-early-wait",
+		SessionKind: sessions.KindInteractive,
+		Toolchain:   "golang",
+		HubURL:      "http://session-hub.session-system.svc.cluster.local:8787",
+		HubToken:    "tok-early-wait",
+	}
+	stalePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: PodName(spec.SessionID), Namespace: cfg.Namespace, UID: types.UID("uid-old")},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.42.0.77",
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "agent", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+			},
+		},
+	}
+	if _, err := cs.CoreV1().Pods(cfg.Namespace).Create(context.Background(), stalePod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create stale pod: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	ep, err := spawner.Spawn(ctx, spec)
+	if err != nil {
+		t.Fatalf("Spawn failed: %v (waitDeleted did not return early on the foreign-UID pod?)", err)
+	}
+	if ep != "http://10.42.0.200:8787" {
+		t.Fatalf("endpoint = %q, want adopted http://10.42.0.200:8787", ep)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("Spawn took %v, want well under the 30s deleteWait deadline", d)
 	}
 }
 

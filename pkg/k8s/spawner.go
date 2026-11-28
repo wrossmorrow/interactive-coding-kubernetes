@@ -106,7 +106,7 @@ func (p *PodSpawner) Spawn(ctx context.Context, spec hub.SpawnSpec) (string, err
 		if derr := p.client.CoreV1().Pods(ns).Delete(ctx, podName, metav1.DeleteOptions{GracePeriodSeconds: &graceZero}); derr != nil && !apierrors.IsNotFound(derr) {
 			log.Printf("force-delete stale sandbox pod %s: %v", podName, derr)
 		}
-		p.waitDeleted(ctx, podName)
+		p.waitDeleted(ctx, podName, existing.UID)
 
 		// waitDeleted is a bounded best-effort wait; confirm the name is
 		// actually released before creating the replacement.
@@ -436,15 +436,24 @@ func (p *PodSpawner) waitPodIP(ctx context.Context, podName string) (string, err
 	}
 }
 
-func (p *PodSpawner) waitDeleted(ctx context.Context, podName string) {
+func (p *PodSpawner) waitDeleted(ctx context.Context, podName string, staleUID types.UID) {
 	// Deadline runs past the default 30s pod termination grace period so a
 	// slow sidecar exit does not leave the pod name held when Spawn creates.
+	// It also returns early if a different pod generation occupies the name
+	// before the stale one disappears (an overlapping Spawn already created
+	// the replacement): waiting for NotFound would run to the full deadline
+	// for no reason, and the caller's confirmation Get handles the new
+	// generation.
 	deadline := time.NewTimer(p.deleteWait)
 	defer deadline.Stop()
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		if _, err := p.client.CoreV1().Pods(p.cfg.Namespace).Get(ctx, podName, metav1.GetOptions{}); apierrors.IsNotFound(err) {
+		pod, err := p.client.CoreV1().Pods(p.cfg.Namespace).Get(ctx, podName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		if err == nil && staleUID != "" && pod.UID != "" && pod.UID != staleUID {
 			return
 		}
 		select {

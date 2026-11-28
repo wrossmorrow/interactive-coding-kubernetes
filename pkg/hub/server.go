@@ -465,6 +465,12 @@ func (s *Server) rejoinSession(ctx context.Context, meta *sessions.Metadata) (*s
 		return nil, err
 	}
 
+	// Re-sync the in-memory token to the shared token secret: when a
+	// concurrent Spawn re-created or was re-used against it, the pod may
+	// have been started with that token rather than the one issued above,
+	// and proxied requests must verify against what the pod presents.
+	s.tokens.Reconcile(id)
+
 	meta.Status = sessions.StatusActive
 	meta.Running = true
 	meta.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
