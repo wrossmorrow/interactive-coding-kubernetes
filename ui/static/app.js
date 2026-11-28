@@ -752,12 +752,57 @@ async function loadSessions() {
   paintSidebar();
 }
 
+// client-side sidebar filtering (search + kind + status); pure over H.sessions.
+const SF = { q: "", kind: "all", status: "all" };
+
+function sidebarFiltersActive() {
+  return SF.q !== "" || SF.kind !== "all" || SF.status !== "all";
+}
+
+function sessionMatches(s) {
+  if (SF.kind !== "all" && (s.session_kind || "interactive") !== SF.kind) return false;
+  if (SF.status === "live") {
+    if (s.status !== "active" && s.status !== "needs-attention") return false;
+  } else if (SF.status !== "all" && s.status !== SF.status) return false;
+  if (SF.q) {
+    const hay = [
+      s.session_name, s.session_id, s.repo, s.branch,
+      s.model_config?.modelId,
+      s.pr_number != null ? `#${s.pr_number}` : "",
+      s.wake_summary,
+    ].filter((v) => v != null && v !== "").join(" ").toLowerCase();
+    if (!hay.includes(SF.q)) return false;
+  }
+  return true;
+}
+
+// paintSidebar() only rebuilds #session-list, so the search input keeps focus
+// when live SSE session_updated events re-render the list.
+$("#sb-search").addEventListener("input", () => {
+  SF.q = $("#sb-search").value.trim().toLowerCase();
+  paintSidebar();
+});
+$("#sb-kind").addEventListener("change", () => { SF.kind = $("#sb-kind").value; paintSidebar(); });
+$("#sb-status").addEventListener("change", () => { SF.status = $("#sb-status").value; paintSidebar(); });
+$("#sb-clear").addEventListener("click", () => {
+  SF.q = ""; SF.kind = "all"; SF.status = "all";
+  $("#sb-search").value = "";
+  $("#sb-kind").value = "all";
+  $("#sb-status").value = "all";
+  paintSidebar();
+});
+
 function paintSidebar() {
   const list = $("#session-list");
   list.textContent = "";
-  const items = [...H.sessions.values()].sort((a, b) => (b.updated_at || b.started_at || "").localeCompare(a.updated_at || a.started_at || ""));
+  const all = [...H.sessions.values()].sort((a, b) => (b.updated_at || b.started_at || "").localeCompare(a.updated_at || a.started_at || ""));
+  const active = sidebarFiltersActive();
+  const items = active ? all.filter(sessionMatches) : all;
+  const metaRow = $("#sb-filter-meta");
+  metaRow.hidden = !active;
+  if (active) $("#sb-count").textContent = `${items.length} / ${all.length}`;
   if (!items.length) {
-    list.append(el("div", "dim", "No sessions yet. Click + new."));
+    list.append(el("div", "dim", active ? "No sessions match the current filters." : "No sessions yet. Click + new."));
     return;
   }
   for (const s of items) {
