@@ -24,14 +24,15 @@ import (
 
 // Config configures a session-hub Server.
 type Config struct {
-	Store            sessions.Store
-	Spawner          Spawner
-	Catalog          piconfig.Catalog
-	UIFS             fs.FS
-	HubBaseURL       string // Internal URL passed to spawned pi-sessiond instances
-	ArchiveSinkToken string // Shared bearer token for agentrunner POST /internal/archive
-	TokenLookup      func(sessionID string) (string, bool)
-	AllowedHosts     []string
+	Store              sessions.Store
+	Spawner            Spawner
+	Catalog            piconfig.Catalog
+	UIFS               fs.FS
+	HubBaseURL         string // Internal URL passed to spawned pi-sessiond instances
+	ArchiveSinkToken   string // Shared bearer token for agentrunner POST /internal/archive
+	TokenLookup        func(sessionID string) (string, bool)
+	AnalystTokenLookup func(token string) bool
+	AllowedHosts       []string
 }
 
 // Server is the session-hub HTTP control plane.
@@ -65,6 +66,9 @@ func NewServer(cfg Config) *Server {
 	tm := NewTokenManager()
 	if cfg.TokenLookup != nil {
 		tm.SetLookup(cfg.TokenLookup)
+	}
+	if cfg.AnalystTokenLookup != nil {
+		tm.SetAnalystLookup(cfg.AnalystTokenLookup)
 	}
 	return &Server{
 		store:            cfg.Store,
@@ -103,8 +107,11 @@ func (s *Server) Routes() http.Handler {
 	// Health probe (exempt from browser Host guard so Kubernetes kubelet PodIP probes succeed).
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 
-	// Internal sandbox ingest API + agentrunner multipart archive sink (bearer-authenticated).
+	// Internal sandbox ingest API + agentrunner multipart archive sink + read-only analyst API.
 	mux.HandleFunc("POST /internal/archive", s.handleInternalArchive)
+	mux.HandleFunc("GET /internal/analyst/sessions", s.handleAnalystListSessions)
+	mux.HandleFunc("GET /internal/analyst/sessions/{id}/transcript", s.handleAnalystGetTranscript)
+	mux.HandleFunc("GET /internal/analyst/search", s.handleAnalystSearch)
 	mux.HandleFunc("PUT /internal/sessions/{id}/objects/{path...}", s.handleInternalPutObject)
 	mux.HandleFunc("GET /internal/sessions/{id}/objects/{path...}", s.handleInternalGetObject)
 	mux.HandleFunc("GET /internal/sessions/{id}/objects", s.handleInternalListObjects)
@@ -259,8 +266,16 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "error": "cannot create automated ARC sessions via interactive API"})
 		return
 	}
+	if req.Kind == sessions.KindAnalyst {
+		req.Repo = ""
+		req.Branch = ""
+	}
 	if req.Toolchain == "" {
-		req.Toolchain = "agent"
+		if req.Kind == sessions.KindAnalyst {
+			req.Toolchain = "python"
+		} else {
+			req.Toolchain = "agent"
+		}
 	}
 	if req.Provider == "" {
 		req.Provider = s.catalog.DefaultProvider
@@ -271,6 +286,10 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	id := sessions.NewID()
 	now := time.Now().UTC().Format(time.RFC3339)
+	wakePolicy := sessions.WakePolicyEvaluateAndStage
+	if req.Kind == sessions.KindAnalyst {
+		wakePolicy = sessions.WakePolicyOff
+	}
 	meta := &sessions.Metadata{
 		SessionID:              id,
 		SessionName:            req.Name,
@@ -279,7 +298,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		Repo:                   req.Repo,
 		Branch:                 req.Branch,
 		Toolchain:              req.Toolchain,
-		WakePolicy:             sessions.WakePolicyEvaluateAndStage,
+		WakePolicy:             wakePolicy,
 		MaxWakeupsPerHumanTurn: sessions.DefaultMaxWakeupsPerHumanTurn,
 		ModelConfig:            map[string]any{"provider": req.Provider, "modelId": req.Model},
 		StartedAt:              now,
@@ -292,17 +311,22 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tok := s.tokens.Issue(id)
+	var analystTok string
+	if req.Kind == sessions.KindAnalyst {
+		analystTok = s.tokens.IssueAnalyst(id)
+	}
 	if _, err := s.spawner.Spawn(r.Context(), SpawnSpec{
-		SessionID:   id,
-		SessionName: req.Name,
-		SessionKind: req.Kind,
-		Repo:        req.Repo,
-		Branch:      req.Branch,
-		Toolchain:   req.Toolchain,
-		Provider:    req.Provider,
-		Model:       req.Model,
-		HubURL:      s.hubBaseURL,
-		HubToken:    tok,
+		SessionID:    id,
+		SessionName:  req.Name,
+		SessionKind:  req.Kind,
+		Repo:         req.Repo,
+		Branch:       req.Branch,
+		Toolchain:    req.Toolchain,
+		Provider:     req.Provider,
+		Model:        req.Model,
+		HubURL:       s.hubBaseURL,
+		HubToken:     tok,
+		AnalystToken: analystTok,
 	}); err != nil {
 		meta.Status = sessions.StatusPaused
 		meta.Running = false
@@ -403,17 +427,22 @@ func (s *Server) rejoinSession(ctx context.Context, meta *sessions.Metadata) (*s
 	}
 
 	tok := s.tokens.Issue(id)
+	var analystTok string
+	if meta.SessionKind == sessions.KindAnalyst {
+		analystTok = s.tokens.IssueAnalyst(id)
+	}
 	if _, err := s.spawner.Spawn(ctx, SpawnSpec{
-		SessionID:   id,
-		SessionName: meta.SessionName,
-		SessionKind: meta.SessionKind,
-		Repo:        meta.Repo,
-		Branch:      meta.Branch,
-		Toolchain:   meta.Toolchain,
-		Provider:    provider,
-		Model:       modelID,
-		HubURL:      s.hubBaseURL,
-		HubToken:    tok,
+		SessionID:    id,
+		SessionName:  meta.SessionName,
+		SessionKind:  meta.SessionKind,
+		Repo:         meta.Repo,
+		Branch:       meta.Branch,
+		Toolchain:    meta.Toolchain,
+		Provider:     provider,
+		Model:        modelID,
+		HubURL:       s.hubBaseURL,
+		HubToken:     tok,
+		AnalystToken: analystTok,
 	}); err != nil {
 		return nil, err
 	}

@@ -5,6 +5,7 @@ import "strings"
 var scrubbedExact = map[string]bool{
 	"SESSION_HUB_TOKEN":              true,
 	"SESSION_SINK_TOKEN":             true,
+	"SESSION_ANALYST_TOKEN":          true,
 	"AGENT_GATEWAY_TOKEN":            true,
 	"MOTHERDUCK_TOKEN":               true,
 	"GOOGLE_APPLICATION_CREDENTIALS": true,

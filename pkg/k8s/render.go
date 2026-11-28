@@ -165,21 +165,28 @@ func (c PodConfig) SandboxImage(toolchain string) string {
 }
 
 // BuildTokenSecret constructs the per-session scoped bearer token Secret.
-func BuildTokenSecret(namespace, sessionID, token string) *corev1.Secret {
+// For analyst sessions it also stores the separate read-only analyst-token key.
+func BuildTokenSecret(namespace, sessionID, token, analystToken string) *corev1.Secret {
+	labels := map[string]string{
+		LabelApp:       "pi-sessiond",
+		LabelComponent: "sandbox",
+		LabelSessionID: sessionID,
+	}
+	data := map[string]string{
+		"token": token,
+	}
+	if analystToken != "" {
+		labels[LabelKind] = string(sessions.KindAnalyst)
+		data["analyst-token"] = analystToken
+	}
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      TokenSecretName(sessionID),
 			Namespace: namespace,
-			Labels: map[string]string{
-				LabelApp:       "pi-sessiond",
-				LabelComponent: "sandbox",
-				LabelSessionID: sessionID,
-			},
+			Labels:    labels,
 		},
-		Type: corev1.SecretTypeOpaque,
-		StringData: map[string]string{
-			"token": token,
-		},
+		Type:       corev1.SecretTypeOpaque,
+		StringData: data,
 	}
 }
 
@@ -404,6 +411,21 @@ func BuildSandboxPod(cfg PodConfig, spec hub.SpawnSpec) *corev1.Pod {
 		{Name: "AGENT_GATEWAY_URL", Value: cfg.GatewayEndpoint},
 		{Name: "PI_IDLE_PAUSE_SECONDS", Value: fmt.Sprintf("%d", cfg.IdlePauseSeconds)},
 		{Name: "PI_FLUSH_INTERVAL_SECONDS", Value: fmt.Sprintf("%d", cfg.FlushIntervalSeconds)},
+	}
+	if kind == sessions.KindAnalyst {
+		agentEnv = append(agentEnv,
+			corev1.EnvVar{Name: "PI_AGENTS_MD", Value: "/opt/agents/analyst.md"},
+			corev1.EnvVar{Name: "SESSION_ANALYST_URL", Value: spec.HubURL},
+			corev1.EnvVar{
+				Name: "SESSION_ANALYST_TOKEN",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: tokenSecret},
+						Key:                  "analyst-token",
+					},
+				},
+			},
+		)
 	}
 	if spec.Provider != "" {
 		agentEnv = append(agentEnv, corev1.EnvVar{Name: "PI_PROVIDER", Value: spec.Provider})

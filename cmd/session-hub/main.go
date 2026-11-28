@@ -87,9 +87,10 @@ func main() {
 	}
 
 	var (
-		srv         *hub.Server
-		spawner     hub.Spawner
-		tokenLookup func(string) (string, bool)
+		srv                *hub.Server
+		spawner            hub.Spawner
+		tokenLookup        func(string) (string, bool)
+		analystTokenLookup func(string) bool
 	)
 	onExit := func(id string) {
 		if srv != nil {
@@ -127,6 +128,7 @@ func main() {
 		}, onExit)
 		spawner = k8sSpawner
 		tokenLookup = k8sSpawner.LookupToken
+		analystTokenLookup = k8sSpawner.VerifyAnalystToken
 	default:
 		log.Fatalf("unsupported --spawner=%q (want local or k8s)", *spawnerMode)
 	}
@@ -141,14 +143,15 @@ func main() {
 	}
 
 	srv = hub.NewServer(hub.Config{
-		Store:            store,
-		Spawner:          spawner,
-		Catalog:          cat,
-		UIFS:             ui.FS(),
-		HubBaseURL:       hubBaseURL,
-		ArchiveSinkToken: *archiveSinkToken,
-		TokenLookup:      tokenLookup,
-		AllowedHosts:     strings.Split(*allowedHosts, ","),
+		Store:              store,
+		Spawner:            spawner,
+		Catalog:            cat,
+		UIFS:               ui.FS(),
+		HubBaseURL:         hubBaseURL,
+		ArchiveSinkToken:   *archiveSinkToken,
+		TokenLookup:        tokenLookup,
+		AnalystTokenLookup: analystTokenLookup,
+		AllowedHosts:       strings.Split(*allowedHosts, ","),
 	})
 
 	if *wakeupInterval > 0 {

@@ -766,7 +766,8 @@ function paintSidebar() {
     const row = el("div", "sb-row");
     row.append(el("span", "sb-name", s.session_name || s.session_id.slice(0, 8)));
     row.append(el("span", "badge " + (s.status || "paused"), s.status || "paused"));
-    const sub = el("div", "sb-sub", [s.repo || "local", s.branch, s.model_config?.modelId].filter(Boolean).join(" · "));
+    const kindTag = s.session_kind && s.session_kind !== "interactive" ? `[${s.session_kind}]` : "";
+    const sub = el("div", "sb-sub", [kindTag, s.repo || (s.session_kind === "analyst" ? "archive" : "local"), s.branch, s.verdict, s.model_config?.modelId].filter(Boolean).join(" · "));
     btn.append(row, sub);
     btn.onclick = () => selectSession(s.session_id);
     list.append(btn);
@@ -819,12 +820,19 @@ async function loadModels() {
 
 $("#btn-new").onclick = () => { $("#modal-backdrop").hidden = false; $("#nm-name").focus(); };
 $("#nm-cancel").onclick = () => { $("#modal-backdrop").hidden = true; };
+$("#nm-kind").addEventListener("change", () => {
+  const isAnalyst = $("#nm-kind").value === "analyst";
+  $("#nm-repo-wrap").hidden = isAnalyst;
+  if (isAnalyst) $("#nm-toolchain").value = "python";
+});
 $("#new-modal").addEventListener("submit", async (e) => {
   e.preventDefault();
   const [provider, model] = ($("#nm-model").value || "|").split("|");
+  const kind = $("#nm-kind").value || "interactive";
   const payload = {
+    kind,
     name: $("#nm-name").value.trim(),
-    repo: $("#nm-repo").value.trim(),
+    repo: kind === "analyst" ? "" : $("#nm-repo").value.trim(),
     toolchain: $("#nm-toolchain").value,
     provider,
     model,

@@ -17,16 +17,17 @@ import (
 
 // SpawnSpec describes the runtime parameters for launching a pi-sessiond instance.
 type SpawnSpec struct {
-	SessionID   string
-	SessionName string
-	SessionKind sessions.Kind
-	Repo        string
-	Branch      string
-	Toolchain   string
-	Provider    string
-	Model       string
-	HubURL      string
-	HubToken    string
+	SessionID    string
+	SessionName  string
+	SessionKind  sessions.Kind
+	Repo         string
+	Branch       string
+	Toolchain    string
+	Provider     string
+	Model        string
+	HubURL       string
+	HubToken     string
+	AnalystToken string
 }
 
 // Spawner abstracts sandbox lifecycle management (LocalSpawner in Milestone 1,
@@ -115,6 +116,12 @@ func (l *LocalSpawner) Spawn(ctx context.Context, spec SpawnSpec) (string, error
 		"PI_AGENT_DIR="+agentDir,
 		"TOOLCHAIN="+spec.Toolchain,
 	)
+	if spec.AnalystToken != "" {
+		env = append(env,
+			"SESSION_ANALYST_URL="+spec.HubURL,
+			"SESSION_ANALYST_TOKEN="+spec.AnalystToken,
+		)
+	}
 	if l.cfg.PiBin != "" {
 		env = append(env, "PI_BIN="+l.cfg.PiBin)
 	}

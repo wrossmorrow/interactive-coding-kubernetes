@@ -51,12 +51,25 @@ func TestBuildSandboxPodTopologyAndIsolation(t *testing.T) {
 		t.Fatalf("unexpected main container: %+v", pod.Spec.Containers)
 	}
 
-	// Verify analyst sessions omit github-auth sidecar (zero repo write access).
+	// Verify analyst sessions omit github-auth sidecar and wire analyst AGENTS.md + read-only token.
 	analystSpec := spec
 	analystSpec.SessionKind = sessions.KindAnalyst
+	analystSpec.AnalystToken = "an_test_tok"
 	analystPod := BuildSandboxPod(cfg, analystSpec)
 	if len(analystPod.Spec.InitContainers) != 1 || analystPod.Spec.InitContainers[0].Name != "egress-proxy" {
 		t.Fatalf("analyst pod should only have egress-proxy sidecar, got %+v", analystPod.Spec.InitContainers)
+	}
+	var hasAnalystMD, hasAnalystTok bool
+	for _, ev := range analystPod.Spec.Containers[0].Env {
+		if ev.Name == "PI_AGENTS_MD" && ev.Value == "/opt/agents/analyst.md" {
+			hasAnalystMD = true
+		}
+		if ev.Name == "SESSION_ANALYST_TOKEN" && ev.ValueFrom != nil && ev.ValueFrom.SecretKeyRef != nil && ev.ValueFrom.SecretKeyRef.Key == "analyst-token" {
+			hasAnalystTok = true
+		}
+	}
+	if !hasAnalystMD || !hasAnalystTok {
+		t.Fatalf("analyst pod missing expected env vars (hasAnalystMD=%v, hasAnalystTok=%v)", hasAnalystMD, hasAnalystTok)
 	}
 }
 
